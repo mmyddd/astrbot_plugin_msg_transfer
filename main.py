@@ -5,7 +5,7 @@ from pathlib import Path
 
 import astrbot.api.star as star
 from astrbot.api.event import filter, AstrMessageEvent
-from astrbot.api.star import Context, Star, register
+from astrbot.api.star import Context, Star
 from astrbot.api import logger
 
 import string
@@ -17,24 +17,40 @@ from astrbot.core.message.components import BaseMessageComponent, Plain
 # 工具与数据路径
 # ------------------------
 
-def get_plugin_data_dir(plugin_name: str) -> Path:
-    """获取符合 AstrBot 规范的插件持久化数据路径"""
-    base = Path(__file__).parent.parent.parent / "plugin_data" / plugin_name
-    base.mkdir(parents=True, exist_ok=True)
-    return base
-
 
 def load_json(path: Path) -> dict:
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
-    except:
+    except FileNotFoundError:
+        logger.error("❌ 文件不存在！本次创建空 JSON！")
         return {}
+    except json.JSONDecodeError as e:
+        logger.error(f"❌ 文件 {path} 不是有效 JSON: {e}")
+        raise ValueError(f"❌ 文件 {path} 不是有效 JSON: {e}") from e
+    except OSError as e:
+        logger.error(f"❌ 读取文件 {path} 失败: {e}")
+        raise RuntimeError(f"❌ 读取文件 {path} 失败: {e}") from e
+    except Exception as e:
+        logger.error(f"❌ 发生预期外的 JSON 读取错误: {e}！")
+        raise RuntimeError(f"❌ 发生预期外的 JSON 读取错误: {e}！")
 
 
 def save_json(path: Path, data: dict):
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    try:
+        tmp = path.with_suffix(".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        tmp.replace(path)
+    except OSError as e:
+        logger.error(f"❌ 写入文件 {path} 失败: {e}")
+        raise RuntimeError(f"❌ 写入文件 {path} 失败: {e}") from e
+    except TypeError as e:
+        logger.error(f"❌ 数据无法序列化为 JSON: {e}")
+        raise ValueError(f"❌ 数据无法序列化为 JSON: {e}") from e
+    except Exception as e:
+        logger.error(f"❌ 发生预期外的 JSON 写入错误: {e}")
+        raise RuntimeError(f"❌ 发生预期外的 JSON 写入错误: {e}") from e
 
 
 def gen_code(n=6):
@@ -150,7 +166,6 @@ class MsgTransferStore:
 # ------------------------
 # 插件主体
 # ------------------------
-@register("astrbot_plugin_msg_transfer", "Siaospeed", "消息转发插件", "0.2.0")
 class MsgTransfer(star.Star):
     def __init__(self, context: Context):
         super().__init__(context)
@@ -227,10 +242,7 @@ class MsgTransfer(star.Star):
             if not rules:
                 return
 
-            try:
-                message_chain = event.get_messages()
-            except:
-                message_chain = event.message_str
+            message_chain = event.get_messages()
 
             for rid, rule in rules.items():
                 target = rule["target_umo"]
@@ -238,17 +250,15 @@ class MsgTransfer(star.Star):
                     header = format_origin_header(event, source_umo)
                     header += "\n\n\u200b"
 
-                    try:
-                        new_chain = list[BaseMessageComponent]([Plain(text=header)]) + message_chain
-                    except Exception:
-                        new_chain = list[BaseMessageComponent]([Plain(text=header + str(message_chain))])
-
+                    new_chain = list[BaseMessageComponent]([Plain(text=header)]) + message_chain
                     await self.context.send_message(target, event.chain_result(new_chain))
+                except ValueError as e:
+                    logger.error(f"❌ 不合法的 session 字符串，转发失败 #{rid}: {e}")
                 except Exception as e:
-                    logger.error(f"转发失败 #{rid}: {e}")
+                    logger.error(f"❌ 转发失败 #{rid}: {e}")
 
         except Exception as e:
-            logger.error(f"转发逻辑异常: {e}")
+            logger.error(f"❌ 转发逻辑异常: {e}")
 
     async def terminate(self):
         logger.info("MsgTransfer plugin terminated")
