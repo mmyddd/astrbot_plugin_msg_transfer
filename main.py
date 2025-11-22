@@ -1,12 +1,13 @@
 import json
 import os
+import secrets
 from pathlib import Path
 
+import astrbot.api.star as star
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 
-import random
 import string
 
 from astrbot.core.message.components import BaseMessageComponent, Plain
@@ -23,18 +24,6 @@ def get_plugin_data_dir(plugin_name: str) -> Path:
     return base
 
 
-DATA_DIR = get_plugin_data_dir("msg_transfer")
-RULE_FILE = DATA_DIR / "rules.json"
-PENDING_FILE = DATA_DIR / "pending.json"
-
-
-def _ensure_files():
-    if not RULE_FILE.exists():
-        RULE_FILE.write_text("{}", encoding="utf-8")
-    if not PENDING_FILE.exists():
-        PENDING_FILE.write_text("{}", encoding="utf-8")
-
-
 def load_json(path: Path) -> dict:
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -49,7 +38,9 @@ def save_json(path: Path, data: dict):
 
 
 def gen_code(n=6):
-    return ''.join(random.choices(string.ascii_lowercase + string.digits, k=n))
+    # 使用 secrets 模块生成更安全的随机字符串
+    alphabet = string.ascii_lowercase + string.digits
+    return ''.join(secrets.choice(alphabet) for _ in range(n))
 
 
 def format_origin_header(event: AstrMessageEvent, umo: str):
@@ -90,15 +81,23 @@ def format_origin_header(event: AstrMessageEvent, umo: str):
 # 存储层（无锁简化）
 # ------------------------
 class MsgTransferStore:
-    def __init__(self):
-        _ensure_files()
+    def __init__(self, rule_file: Path, pending_file: Path):
+        self.rule_file = rule_file
+        self.pending_file = pending_file
+        self._ensure_files()
+
+    def _ensure_files(self):
+        if not self.rule_file.exists():
+            self.rule_file.write_text("{}", encoding="utf-8")
+        if not self.pending_file.exists():
+            self.pending_file.write_text("{}", encoding="utf-8")
 
     # ----- rules -----
     def load_rules(self):
-        return load_json(RULE_FILE)
+        return load_json(self.rule_file)
 
     def save_rules(self, data: dict):
-        save_json(RULE_FILE, data)
+        save_json(self.rule_file, data)
 
     def add_rule(self, source_umo: str, target_umo: str) -> str:
         data = self.load_rules()
@@ -129,10 +128,10 @@ class MsgTransferStore:
 
     # ----- pending -----
     def load_pending(self):
-        return load_json(PENDING_FILE)
+        return load_json(self.pending_file)
 
     def save_pending(self, data: dict):
-        save_json(PENDING_FILE, data)
+        save_json(self.pending_file, data)
 
     def add_pending(self, code: str, source_umo: str):
         p = self.load_pending()
@@ -152,10 +151,15 @@ class MsgTransferStore:
 # 插件主体
 # ------------------------
 @register("astrbot_plugin_msg_transfer", "Siaospeed", "消息转发插件", "0.2.0")
-class MsgTransfer(Star):
+class MsgTransfer(star.Star):
     def __init__(self, context: Context):
         super().__init__(context)
-        self.store = MsgTransferStore()
+        # 使用 AstrBot 提供的标准方法获取项目持久化数据存储目录
+        self.data_dir = star.StarTools.get_data_dir("msg_transfer")
+        self.rule_file = self.data_dir / "rules.json"
+        self.pending_file = self.data_dir / "pending.json"
+
+        self.store = MsgTransferStore(self.rule_file, self.pending_file)
 
     async def initialize(self):
         logger.info("MsgTransfer plugin init OK")
@@ -213,19 +217,6 @@ class MsgTransfer(Star):
         for rid, r in rules.items():
             lines.append(f"#{rid} {r['source_umo']} → {r['target_umo']}")
         yield event.plain_result("\n".join(lines))
-
-    @mt.command("help")
-    async def help(self, event: AstrMessageEvent):
-        """显示该插件帮助信息"""
-        help_message = \
-            f"消息转发插件指令: \n" \
-            f"#mt list\n列出与当前会话相关的所有转发规则。\n\n" \
-            f"#mt add\n创建一则绑定请求。（管理员权限）\n\n" \
-            f"#mt bind <code>\n接受一则绑定请求。（管理员权限）\n\n" \
-            f"#mt del <rule_id>\n删除一条转发规则。（管理员权限）\n\n" \
-            f"#mt anonymous <rule_id>\n在指定编号的转发关系中启用匿名模式。\n\n" \
-            f"#mt help\n显示本帮助信息。"
-        yield event.plain_result(help_message)
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def forward_message(self, event: AstrMessageEvent):
