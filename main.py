@@ -1,24 +1,263 @@
-from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
+import json
+import os
+from pathlib import Path
+
+from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 
-@register("helloworld", "YourName", "一个简单的 Hello World 插件", "1.0.0")
-class MyPlugin(Star):
+import random
+import string
+
+from astrbot.core.message.components import BaseMessageComponent, Plain
+
+
+# ------------------------
+# 工具与数据路径
+# ------------------------
+
+def get_plugin_data_dir(plugin_name: str) -> Path:
+    """获取符合 AstrBot 规范的插件持久化数据路径"""
+    base = Path(__file__).parent.parent.parent / "plugin_data" / plugin_name
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
+DATA_DIR = get_plugin_data_dir("msg_transfer")
+RULE_FILE = DATA_DIR / "rules.json"
+PENDING_FILE = DATA_DIR / "pending.json"
+
+
+def _ensure_files():
+    if not RULE_FILE.exists():
+        RULE_FILE.write_text("{}", encoding="utf-8")
+    if not PENDING_FILE.exists():
+        PENDING_FILE.write_text("{}", encoding="utf-8")
+
+
+def load_json(path: Path) -> dict:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except:
+        return {}
+
+
+def save_json(path: Path, data: dict):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def gen_code(n=6):
+    return ''.join(random.choices(string.ascii_lowercase + string.digits, k=n))
+
+
+def format_origin_header(event: AstrMessageEvent, umo: str):
+    try:
+        _, msg_type, conversation_id = umo.split(":", 2)
+    except ValueError:
+        msg_type = "Unknown"
+        conversation_id = "Unknown"
+
+    source_platform = event.get_platform_name()
+    sender_name = event.get_sender_name()
+    sender_id = event.get_sender_id()
+
+    # 平台友好名称
+    source_platform_map = {
+        "aiocqhttp": "QQ",
+        "wechatpadpro": "微信",
+        "telegram": "Telegram",
+        "discord": "Discord",
+    }
+    source_platform_human = source_platform_map.get(source_platform, source_platform)
+
+    # 消息类型友好名称
+    if msg_type == "GroupMessage":
+        msg_type_human = f"群组（ID: {conversation_id}）消息"
+    elif msg_type == "FriendMessage":
+        msg_type_human = f"私聊（对方 ID: {conversation_id}）消息"
+    else:
+        msg_type_human = f"未知类型（ID: {conversation_id}）消息"
+
+    return (
+        f"[转发] {sender_name} ({sender_id})\n"
+        f"来自 {source_platform_human} 的 {msg_type_human}"
+    )
+
+
+# ------------------------
+# 存储层（无锁简化）
+# ------------------------
+class MsgTransferStore:
+    def __init__(self):
+        _ensure_files()
+
+    # ----- rules -----
+    def load_rules(self):
+        return load_json(RULE_FILE)
+
+    def save_rules(self, data: dict):
+        save_json(RULE_FILE, data)
+
+    def add_rule(self, source_umo: str, target_umo: str) -> str:
+        data = self.load_rules()
+
+        # 查重
+        for rid, rule in data.items():
+            if rule["source_umo"] == source_umo and rule["target_umo"] == target_umo:
+                raise ValueError(f"规则已存在 #{rid}")
+
+        new_id = str(max(map(int, data.keys()), default=0) + 1)
+        data[new_id] = {
+            "source_umo": source_umo,
+            "target_umo": target_umo
+        }
+        self.save_rules(data)
+        return new_id
+
+    def delete_rule(self, rid: str):
+        data = self.load_rules()
+        if rid not in data:
+            raise KeyError("规则不存在")
+        data.pop(rid)
+        self.save_rules(data)
+
+    def list_rules(self, source_umo):
+        data = self.load_rules()
+        return {rid: r for rid, r in data.items() if r["source_umo"] == source_umo}
+
+    # ----- pending -----
+    def load_pending(self):
+        return load_json(PENDING_FILE)
+
+    def save_pending(self, data: dict):
+        save_json(PENDING_FILE, data)
+
+    def add_pending(self, code: str, source_umo: str):
+        p = self.load_pending()
+        p[code] = source_umo
+        self.save_pending(p)
+
+    def pop_pending(self, code: str):
+        p = self.load_pending()
+        if code not in p:
+            raise KeyError("绑定码不存在或已使用")
+        source_umo = p.pop(code)
+        self.save_pending(p)
+        return source_umo
+
+
+# ------------------------
+# 插件主体
+# ------------------------
+@register("astrbot_plugin_msg_transfer", "Siaospeed", "消息转发插件", "0.2.0")
+class MsgTransfer(Star):
     def __init__(self, context: Context):
         super().__init__(context)
+        self.store = MsgTransferStore()
 
     async def initialize(self):
-        """可选择实现异步的插件初始化方法，当实例化该插件类之后会自动调用该方法。"""
+        logger.info("MsgTransfer plugin init OK")
 
-    # 注册指令的装饰器。指令名为 helloworld。注册成功后，发送 `/helloworld` 就会触发这个指令，并回复 `你好, {user_name}!`
-    @filter.command("helloworld")
-    async def helloworld(self, event: AstrMessageEvent):
-        """这是一个 hello world 指令""" # 这是 handler 的描述，将会被解析方便用户了解插件内容。建议填写。
-        user_name = event.get_sender_name()
-        message_str = event.message_str # 用户发的纯文本消息字符串
-        message_chain = event.get_messages() # 用户所发的消息的消息链 # from astrbot.api.message_components import *
-        logger.info(message_chain)
-        yield event.plain_result(f"Hello, {user_name}, 你发了 {message_str}!") # 发送一条纯文本消息
+    @filter.command_group("mt")
+    def mt(self):
+        """mt 命令组"""
+        pass
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @mt.command("add")
+    async def cmd_add(self, event: AstrMessageEvent):
+        """创建一则消息转发绑定的请求"""
+        code = gen_code()
+        source_umo = str(event.unified_msg_origin)
+        self.store.add_pending(code, source_umo)
+
+        yield event.plain_result(
+            f"📌 已创建绑定请求\n"
+            f"请在目标会话执行：#mt bind {code}"
+        )
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @mt.command("bind")
+    async def cmd_bind(self, event: AstrMessageEvent, code: str):
+        """接受一则消息转发绑定的请求"""
+        try:
+            target_umo = str(event.unified_msg_origin)
+            source_umo = self.store.pop_pending(code)
+            rid = self.store.add_rule(source_umo, target_umo)
+            yield event.plain_result(f"✅ 已绑定 #{rid}\n{source_umo} → {target_umo}")
+        except Exception as e:
+            yield event.plain_result(f"❌ 绑定失败：{e}")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @mt.command("del")
+    async def cmd_del(self, event: AstrMessageEvent, rid: str):
+        """删除一条转发规则"""
+        try:
+            self.store.delete_rule(rid)
+            yield event.plain_result(f"🗑️ 已删除规则 #{rid}")
+        except Exception as e:
+            yield event.plain_result(f"❌ 删除失败: {e}")
+
+    @mt.command("list")
+    async def cmd_list(self, event: AstrMessageEvent):
+        """列出与当前会话相关的所有转发规则"""
+        source_umo = str(event.unified_msg_origin)
+        rules = self.store.list_rules(source_umo)
+        if not rules:
+            yield event.plain_result("📭 当前会话没有规则")
+            return
+
+        lines = [f"📜 当前会话({source_umo}) 的规则："]
+        for rid, r in rules.items():
+            lines.append(f"#{rid} {r['source_umo']} → {r['target_umo']}")
+        yield event.plain_result("\n".join(lines))
+
+    @mt.command("help")
+    async def help(self, event: AstrMessageEvent):
+        """显示该插件帮助信息"""
+        help_message = \
+            f"消息转发插件指令: \n" \
+            f"#mt list\n列出与当前会话相关的所有转发规则。\n\n" \
+            f"#mt add\n创建一则绑定请求。（管理员权限）\n\n" \
+            f"#mt bind <code>\n接受一则绑定请求。（管理员权限）\n\n" \
+            f"#mt del <rule_id>\n删除一条转发规则。（管理员权限）\n\n" \
+            f"#mt anonymous <rule_id>\n在指定编号的转发关系中启用匿名模式。\n\n" \
+            f"#mt help\n显示本帮助信息。"
+        yield event.plain_result(help_message)
+
+    @filter.event_message_type(filter.EventMessageType.ALL)
+    async def forward_message(self, event: AstrMessageEvent):
+        """主转发逻辑"""
+        try:
+            source_umo = str(event.unified_msg_origin)
+            rules = self.store.list_rules(source_umo)
+            if not rules:
+                return
+
+            try:
+                message_chain = event.get_messages()
+            except:
+                message_chain = event.message_str
+
+            for rid, rule in rules.items():
+                target = rule["target_umo"]
+                try:
+                    header = format_origin_header(event, source_umo)
+                    header += "\n\n\u200b"
+
+                    try:
+                        new_chain = list[BaseMessageComponent]([Plain(text=header)]) + message_chain
+                    except Exception:
+                        new_chain = list[BaseMessageComponent]([Plain(text=header + str(message_chain))])
+
+                    await self.context.send_message(target, event.chain_result(new_chain))
+                except Exception as e:
+                    logger.error(f"转发失败 #{rid}: {e}")
+
+        except Exception as e:
+            logger.error(f"转发逻辑异常: {e}")
 
     async def terminate(self):
-        """可选择实现异步的插件销毁方法，当插件被卸载/停用时会调用。"""
+        logger.info("MsgTransfer plugin terminated")
