@@ -396,21 +396,51 @@ class MsgTransfer(star.Star):
             # 加载QQ号-名称映射
             mapping = self.store.load_mappings()
 
+            # 检查是否有引用消息（Quote/Reply）
+            quote_text = None
+            quote_sender = None
+            # 适配 OneBot v11 的引用消息段类型为 'Quote' 或 'Reply'
+            for seg in message_chain:
+                if seg.__class__.__name__ in ("Quote", "Reply"):
+                    # 尝试获取被引用消息内容和发送者
+                    if hasattr(seg, "origin_text"):
+                        quote_text = seg.origin_text
+                    if hasattr(seg, "origin_sender"):
+                        quote_sender = seg.origin_sender
+                    # 兼容部分平台字段
+                    if hasattr(seg, "text") and not quote_text:
+                        quote_text = seg.text
+                    if hasattr(seg, "sender_name") and not quote_sender:
+                        quote_sender = seg.sender_name
+                    break
+
             # 替换消息链中的At(QQ)为对应名称
             new_chain = []
             for seg in message_chain:
                 if seg.__class__.__name__ == "At" and hasattr(seg, "qq"):
                     qq_id = str(seg.qq)
                     qq_name = mapping.get(qq_id, qq_id)
-                    # Discord不支持At，直接用名称替代
                     new_chain.append(Plain(f"@{qq_name} "))
+                elif seg.__class__.__name__ in ("Quote", "Reply"):
+                    # Discord不支持原生引用，转为文本前缀
+                    continue  # 不直接转发引用段
                 else:
                     new_chain.append(seg)
+
+            # 构建引用文本（如有）
+            quote_block = None
+            if quote_text:
+                if quote_sender:
+                    quote_block = f"> **{quote_sender}**: {quote_text}\n"
+                else:
+                    quote_block = f"> {quote_text}\n"
 
             # 构建虚拟用户信息
             virtual_username = DiscordWebhookManager.build_virtual_username(sender_name, source_platform)
             avatar_url = DiscordWebhookManager.get_avatar_url(source_platform, sender_id)
             content = DiscordWebhookManager.format_message_content(new_chain)
+            if quote_block:
+                content = quote_block + content
 
             success = await DiscordWebhookManager.send_webhook_message(
                 webhook_url=webhook_url,
