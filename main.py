@@ -403,7 +403,7 @@ class MsgTransfer(star.Star):
                         quote_sender = seg.sender_name
                     break
 
-            # 替换消息链中的At(QQ)为对应名称，并处理文件类型
+            # 替换消息链中的At(QQ)为对应名称
             new_chain = []
             for seg in message_chain:
                 if seg.__class__.__name__ == "At" and hasattr(seg, "qq"):
@@ -412,17 +412,6 @@ class MsgTransfer(star.Star):
                     new_chain.append(Plain(f"@{qq_name} "))
                 elif seg.__class__.__name__ in ("Quote", "Reply"):
                     continue  # 不直接转发引用段
-                elif hasattr(seg, "file") and hasattr(seg.file, "url") and seg.file.url:
-                    # 文件类型，带文件名，强制加扩展名提示
-                    file_url = seg.file.url
-                    file_name = getattr(seg.file, "name", None)
-                    if file_name:
-                        # 尝试用Markdown格式让用户易于保存
-                        new_chain.append(Plain(f"[文件：{file_name}]({file_url})\n{file_url}"))
-                    else:
-                        new_chain.append(Plain(file_url))
-                elif hasattr(seg, "url") and seg.url:
-                    new_chain.append(Plain(seg.url))
                 else:
                     new_chain.append(seg)
 
