@@ -3,18 +3,16 @@ import aiohttp
 from astrbot.api import logger
 from astrbot.core.star.star import star_map
 
-import discord  # Pycord
-
 try:
     import discord
     HAS_DISCORD = True
 except ImportError:
     HAS_DISCORD = False
-    logger.warning("未安装py-cord库，自动创建Webhook功能不可用")
+    logger.warning("未安装discord库，自动创建Webhook功能不可用")
 
 
 class DiscordWebhookManager:
-    """Discord Webhook管理器 (Pycord版)"""
+    """Discord Webhook管理器"""
     
     def __init__(self, context=None):
         self._discord_client = None
@@ -102,7 +100,7 @@ class DiscordWebhookManager:
             Webhook URL，如果创建失败返回None
         """
         if not HAS_DISCORD:
-            logger.error("❌ 未安装py-cord库，无法自动创建Webhook")
+            logger.error("❌ 未安装discord库，无法自动创建Webhook")
             return None
         
         client = self._get_discord_client()
@@ -116,6 +114,11 @@ class DiscordWebhookManager:
             channel = client.get_channel(channel_id)
             if not channel:
                 logger.error(f"❌ 无法获取频道 {channel_id}")
+                return None
+            
+            # 检查是否可以创建Webhook
+            if not hasattr(channel, 'create_webhook'):
+                logger.error(f"❌ 频道 {channel_id} 不支持创建Webhook")
                 return None
             
             # 创建Webhook
@@ -161,10 +164,10 @@ class DiscordWebhookManager:
             return DiscordWebhookManager.get_discord_avatar_url(user_id)
         else:
             return DiscordWebhookManager.get_default_avatar_url()
-        
+    
     @staticmethod
-    async def format_message_content_async(message_chain) -> str:
-        """异步格式化消息内容，避免同步访问 <File>.file，自动补全fname参数，保证下载体验"""
+    def format_message_content(message_chain) -> str:
+        """格式化消息内容为文本+图片分离，图片url单独一行，保证图片和文本都完整显示"""
         text_parts = []
         image_urls = []
         for component in message_chain:
@@ -174,28 +177,6 @@ class DiscordWebhookManager:
             # 处理@消息
             elif hasattr(component, 'qq') and component.qq:
                 text_parts.append(f"<@{component.qq}>")
-            # 处理文件类型，自动补全fname参数，异步获取url和name
-            elif hasattr(component, 'get_file') and callable(component.get_file):
-                try:
-                    file_obj = await component.get_file()
-                    file_url = getattr(file_obj, 'url', None)
-                    file_name = getattr(file_obj, 'name', None)
-                    if file_url:
-                        # 针对QQ/企微等ftn_handler直链，自动补全fname参数
-                        if file_name and 'ftn.qq.com/ftn_handler/' in file_url:
-                            if 'fname=' not in file_url or file_url.endswith('fname='):
-                                from urllib.parse import quote
-                                safe_name = quote(file_name)
-                                if '?' in file_url:
-                                    file_url = file_url.split('?')[0] + f'?fname={safe_name}'
-                                else:
-                                    file_url = file_url + f'?fname={safe_name}'
-                        # 保证直链一定被加入 image_urls（这样能在 Discord 里直接点开）
-                        image_urls.append(file_url)
-                        # 也保留文件名说明
-                        text_parts.append(f"[文件：{file_name}]({file_url})" if file_name else file_url)
-                except Exception as e:
-                    text_parts.append("[文件获取失败]")
             # 处理URL（图片/文件/资源）
             elif hasattr(component, 'url') and component.url:
                 image_urls.append(component.url)
@@ -231,14 +212,13 @@ class DiscordWebhookManager:
             # Discord不允许content和embeds都为空，但允许content为空
             if not content:
                 content = "\u200b"  # 零宽空格
-            # 如果 content 是协程，需 await 获取内容
-            if hasattr(content, "__await__"):
-                content = await content
+            
             payload = {
                 "content": content,
                 "username": username,
                 "avatar_url": avatar_url
             }
+            
             async with aiohttp.ClientSession() as session:
                 async with session.post(webhook_url, json=payload) as resp:
                     if resp.status in [200, 204, 201]:  # 200, 204, 201都表示成功

@@ -403,7 +403,7 @@ class MsgTransfer(star.Star):
                         quote_sender = seg.sender_name
                     break
 
-            # 替换消息链中的At(QQ)为对应名称
+            # 替换消息链中的At(QQ)为对应名称，并处理文件类型（移回main）
             new_chain = []
             for seg in message_chain:
                 if seg.__class__.__name__ == "At" and hasattr(seg, "qq"):
@@ -412,6 +412,25 @@ class MsgTransfer(star.Star):
                     new_chain.append(Plain(f"@{qq_name} "))
                 elif seg.__class__.__name__ in ("Quote", "Reply"):
                     continue  # 不直接转发引用段
+                elif hasattr(seg, "get_file") and callable(seg.get_file):
+                    try:
+                        file_obj = await seg.get_file()
+                        file_url = getattr(file_obj, 'url', None)
+                        file_name = getattr(file_obj, 'name', None)
+                        if file_url:
+                            # 针对QQ/企微等ftn_handler直链，自动补全fname参数
+                            if file_name and 'ftn.qq.com/ftn_handler/' in file_url:
+                                if 'fname=' not in file_url or file_url.endswith('fname='):
+                                    from urllib.parse import quote
+                                    safe_name = quote(file_name)
+                                    if '?' in file_url:
+                                        file_url = file_url.split('?')[0] + f'?fname={safe_name}'
+                                    else:
+                                        file_url = file_url + f'?fname={safe_name}'
+                            # 直链和文件名说明
+                            new_chain.append(Plain(f"[文件：{file_name}]({file_url})\n{file_url}" if file_name else file_url))
+                    except Exception as e:
+                        new_chain.append(Plain("[文件获取失败]"))
                 else:
                     new_chain.append(seg)
 
@@ -427,7 +446,8 @@ class MsgTransfer(star.Star):
             # 构建虚拟用户信息
             virtual_username = DiscordWebhookManager.build_virtual_username(sender_name, source_platform)
             avatar_url = DiscordWebhookManager.get_avatar_url(source_platform, sender_id)
-            content = DiscordWebhookManager.format_message_content_async(new_chain)
+            # 文件处理已在main完成，直接用format_message_content
+            content = DiscordWebhookManager.format_message_content(new_chain)
             if quote_block:
                 content = quote_block + content
 
