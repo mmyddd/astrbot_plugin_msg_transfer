@@ -143,7 +143,45 @@ class MsgTransferStore:
 
     def list_rules(self, source_umo):
         data = self.load_rules()
-        return {rid: r for rid, r in data.items() if r["source_umo"] == source_umo}
+        
+        # 首先尝试精确匹配
+        exact_matches = {rid: r for rid, r in data.items() if r["source_umo"] == source_umo}
+        if exact_matches:
+            return exact_matches
+        
+        # 如果精确匹配失败，尝试模糊匹配（处理会话隔离关闭的情况）
+        # 当会话隔离关闭时，source_umo 格式从 "platform:GroupMessage:group_user" 变成 "platform:GroupMessage:user"
+        fuzzy_matches = {}
+        
+        try:
+            parts = source_umo.split(":")
+            if len(parts) >= 3:
+                platform = parts[0]
+                msg_type = parts[1]
+                current_id_part = parts[2]  # 可能是用户ID或群组_用户ID
+                
+                for rid, rule in data.items():
+                    rule_source = rule["source_umo"]
+                    rule_parts = rule_source.split(":")
+                    
+                    if len(rule_parts) >= 3:
+                        rule_platform = rule_parts[0]
+                        rule_msg_type = rule_parts[1]
+                        rule_id_part = rule_parts[2]
+                        
+                        # 检查平台和消息类型是否匹配
+                        if rule_platform == platform and rule_msg_type == msg_type:
+                            # 检查ID是否匹配（可能是完整匹配或后缀匹配）
+                            if (rule_id_part == current_id_part or 
+                                rule_id_part.endswith("_" + current_id_part) or
+                                current_id_part.endswith("_" + rule_id_part)):
+                                fuzzy_matches[rid] = rule
+                                logger.info(f"[FuzzyMatch] 模糊匹配规则 #{rid}: {rule_source} -> {source_umo}")
+        
+        except Exception as e:
+            logger.error(f"[FuzzyMatch] 模糊匹配异常: {e}")
+        
+        return fuzzy_matches
 
     # ----- pending -----
     def load_pending(self):
@@ -279,7 +317,6 @@ class MsgTransfer(star.Star):
         for rid, r in rules.items():
             lines.append(f"#{rid}")
         yield event.plain_result("\n".join(lines))
-
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def forward_message(self, event: AstrMessageEvent):
