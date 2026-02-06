@@ -82,7 +82,7 @@ def format_origin_header(event: AstrMessageEvent, umo: str):
     # 消息类型友好名称
     if msg_type == "GroupMessage":
         msg_type_human = f"群组（ID: {conversation_id}）消息"
-    elif msg_type == "FriendMessage":
+    elif msg_type_human == "FriendMessage":
         msg_type_human = f"私聊（对方 ID: {conversation_id}）消息"
     else:
         msg_type_human = f"未知类型（ID: {conversation_id}）消息"
@@ -420,20 +420,7 @@ class MsgTransfer(star.Star):
             # 构建引用文本（如有）
             quote_block = None
             if quote_text:
-                # 优先用 quote_sender，其次mapping查找ID昵称，最后用ID兜底
-                display_sender = None
-                if quote_sender:
-                    display_sender = quote_sender
-                else:
-                    # 尝试从引用段获取qq/user_id
-                    quote_id = None
-                    if hasattr(seg, "qq"):
-                        quote_id = str(seg.qq)
-                    elif hasattr(seg, "user_id"):
-                        quote_id = str(seg.user_id)
-                    if quote_id:
-                        display_sender = mapping.get(quote_id, quote_id)
-                quote_block = f"> **{display_sender}**: {quote_text}\n"
+                quote_block = f"> {quote_text}\n"
 
             # 构建虚拟用户信息
             virtual_username = DiscordWebhookManager.build_virtual_username(sender_name, source_platform)
