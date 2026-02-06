@@ -469,8 +469,7 @@ class MsgTransfer(star.Star):
             source_platform = event.get_platform_name()
             
             # 自动创建映射表（如果不存在）
-            DiscordWebhookManager.auto_create_mapping_if_needed(
-                self.user_mapping_manager,
+            self.user_mapping_manager.create_mapping_if_not_exists(
                 source_platform,
                 sender_id,
                 "discord",
