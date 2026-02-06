@@ -397,13 +397,21 @@ class MsgTransfer(star.Star):
             mapping = self.store.load_mappings()
 
             # 检查是否有引用消息（Quote/Reply）
-            quote_id = None
+            quote_text = None
+            quote_sender = None
+            # 适配 OneBot v11 的引用消息段类型为 'Quote' 或 'Reply'
             for seg in message_chain:
                 if seg.__class__.__name__ in ("Quote", "Reply"):
-                    if hasattr(seg, "origin_message_id"):
-                        quote_id = str(seg.origin_message_id)
-                    elif hasattr(seg, "id"):
-                        quote_id = str(seg.id)
+                    # 尝试获取被引用消息内容和发送者
+                    if hasattr(seg, "origin_text"):
+                        quote_text = seg.origin_text
+                    if hasattr(seg, "origin_sender"):
+                        quote_sender = seg.origin_sender
+                    # 兼容部分平台字段
+                    if hasattr(seg, "text") and not quote_text:
+                        quote_text = seg.text
+                    if hasattr(seg, "sender_name") and not quote_sender:
+                        quote_sender = seg.sender_name
                     break
 
             # 替换消息链中的At(QQ)为对应名称
@@ -414,43 +422,33 @@ class MsgTransfer(star.Star):
                     qq_name = mapping.get(qq_id, qq_id)
                     new_chain.append(Plain(f"@{qq_name} "))
                 elif seg.__class__.__name__ in ("Quote", "Reply"):
-                    continue
+                    # Discord不支持原生引用，转为文本前缀
+                    continue  # 不直接转发引用段
                 else:
                     new_chain.append(seg)
+
+            # 构建引用文本（如有）
+            quote_block = None
+            if quote_text:
+                if quote_sender:
+                    quote_block = f"> **{quote_sender}**: {quote_text}\n"
+                else:
+                    quote_block = f"> {quote_text}\n"
 
             # 构建虚拟用户信息
             virtual_username = DiscordWebhookManager.build_virtual_username(sender_name, source_platform)
             avatar_url = DiscordWebhookManager.get_avatar_url(source_platform, sender_id)
             content = DiscordWebhookManager.format_message_content(new_chain)
+            if quote_block:
+                content = quote_block + content
 
-            # 支持 Discord 原生引用：传递 message_reference 参数（需webhook实现支持）
-            extra = {}
-            if quote_id:
-                # 做QQ消息ID到Discord消息ID的映射
-                mapping = self.store.load_mappings()
-                qq2discord = mapping.get("qq2discord", {})
-                discord_msg_id = qq2discord.get(quote_id)
-                if discord_msg_id:
-                    extra["message_reference"] = {"message_id": discord_msg_id}
-
-            # 发送消息
             success = await DiscordWebhookManager.send_webhook_message(
                 webhook_url=webhook_url,
                 username=virtual_username,
                 avatar_url=avatar_url,
-                content=content,
-                **extra
+                content=content
             )
-
-            # 发送成功后，记录QQ消息ID与Discord消息ID的映射（需webhook返回discord消息ID）
-            if hasattr(event, "message_id") and hasattr(success, "id"):
-                mapping = self.store.load_mappings()
-                qq2discord = mapping.get("qq2discord", {})
-                qq2discord[str(event.message_id)] = str(success.id)
-                mapping["qq2discord"] = qq2discord
-                self.store.save_mappings(mapping)
-
-            return bool(success)
+            return success
         except Exception as e:
             logger.error(f"❌ Webhook转发异常 #{rule_id}: {e}")
             return False
