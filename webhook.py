@@ -167,14 +167,28 @@ class DiscordWebhookManager:
     
     @staticmethod
     def format_message_content(message_chain) -> str:
-        """格式化消息内容为文本"""
+        """格式化消息内容为文本
+        
+        Returns:
+            str: 文本内容（Discord会自动识别URL并显示图片）
+        """
         content_parts = []
         for component in message_chain:
-            # 只处理文本和@消息
+            # 处理文本
             if hasattr(component, 'text') and component.text:
                 content_parts.append(component.text)
+            # 处理@消息
             elif hasattr(component, 'qq') and component.qq:
                 content_parts.append(f"<@{component.qq}>")
+            # 处理URL（Discord会自动识别并显示图片）
+            elif hasattr(component, 'url') and component.url:
+                content_parts.append(component.url)
+            # 处理其他可能包含URL的组件
+            elif hasattr(component, 'file') and hasattr(component.file, 'url'):
+                content_parts.append(component.file.url)
+            elif hasattr(component, 'src'):
+                content_parts.append(component.src)
+        
         return "".join(content_parts)
     
     @staticmethod
@@ -190,7 +204,7 @@ class DiscordWebhookManager:
             webhook_url: Discord Webhook URL
             username: 虚拟用户名
             avatar_url: 虚拟用户头像URL
-            content: 消息内容
+            content: 消息内容（Discord会自动识别URL并显示图片）
             
         Returns:
             bool: 是否发送成功

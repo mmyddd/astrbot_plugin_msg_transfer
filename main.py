@@ -232,7 +232,7 @@ class MsgTransfer(star.Star):
             source_umo = self.store.pop_pending(code)
             rid = self.store.add_rule(source_umo, target_umo)
             
-            # 如果目标是Discord，自动创建Webhook
+            # 如果目标是Discord，自动创建Webhook（黑盒操作，不告知用户）
             # 检查平台名称或UMO格式
             target_platform = event.get_platform_name()
             is_discord = target_platform == "discord" or "discord" in target_umo.lower()
@@ -250,21 +250,8 @@ class MsgTransfer(star.Star):
                     webhook_url = await self.webhook_manager.create_webhook_for_channel(int(channel_id))
                     if webhook_url:
                         self.store.set_webhook_url(target_umo, webhook_url)
-                        yield event.plain_result(
-                            f"✅ 已绑定 #{rid}\n"
-                            f"{source_umo} → {target_umo}\n"
-                            f"🎉 已自动创建Webhook，消息将以虚拟用户形式显示"
-                        )
-                    else:
-                        yield event.plain_result(
-                            f"✅ 已绑定 #{rid}\n"
-                            f"{source_umo} → {target_umo}\n"
-                            f"⚠️ 自动创建Webhook失败，将使用普通转发模式"
-                        )
-                else:
-                    yield event.plain_result(f"✅ 已绑定 #{rid}\n{source_umo} → {target_umo}")
-            else:
-                yield event.plain_result(f"✅ 已绑定 #{rid}\n{source_umo} → {target_umo}")
+            
+            yield event.plain_result(f"✅ 绑定成功 # {rid}")
         except Exception as e:
             logger.error(f"[Bind] 绑定异常: {e}", exc_info=True)
             yield event.plain_result(f"❌ 绑定失败：{e}")
@@ -285,81 +272,14 @@ class MsgTransfer(star.Star):
         source_umo = str(event.unified_msg_origin)
         rules = self.store.list_rules(source_umo)
         if not rules:
-            yield event.plain_result("📭 当前会话没有规则")
+            yield event.plain_result("📭 当前没有转发规则")
             return
 
-        lines = [f"📜 当前会话({source_umo}) 的规则："]
+        lines = [f"📜 转发规则（{len(rules)}条）"]
         for rid, r in rules.items():
-            webhook_status = "✨ 虚拟用户" if self.store.get_webhook_url(r['target_umo']) else "📤 普通转发"
-            lines.append(f"#{rid} {r['source_umo']} → {r['target_umo']} [{webhook_status}]")
+            lines.append(f"#{rid}")
         yield event.plain_result("\n".join(lines))
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @mt.command("webhook")
-    async def cmd_webhook(self, event: AstrMessageEvent, action: str = ""):
-        """管理Discord Webhook
-        
-        用法：
-        /mt webhook           - 查看当前Webhook状态
-        /mt webhook create    - 自动创建Webhook
-        /mt webhook <URL>     - 手动设置Webhook URL
-        """
-        current_umo = str(event.unified_msg_origin)
-        
-        # 提取channel_id（支持多种UMO格式）
-        channel_id = None
-        parts = current_umo.split(":")
-        
-        # 尝试获取频道ID
-        if len(parts) >= 3:
-            channel_id = parts[2]
-        elif len(parts) == 2:
-            channel_id = parts[1]
-        
-        if not channel_id:
-            yield event.plain_result(f"❌ 无法获取频道ID，UMO格式: {current_umo}")
-            return
-        
-        if not action:
-            # 查看当前Webhook状态
-            existing_url = self.store.get_webhook_url(current_umo)
-            if existing_url:
-                yield event.plain_result(
-                    f"✨ 当前Webhook已启用\n"
-                    f"URL: {existing_url}\n"
-                    f"💡 转发的消息将以虚拟用户形式显示"
-                )
-            else:
-                yield event.plain_result(
-                    f"📭 当前会话未设置Webhook\n"
-                    f"💡 提示：执行 `/mt webhook create` 自动创建Webhook"
-                )
-        elif action.lower() == "create":
-            # 自动创建Webhook
-            yield event.plain_result("🔄 正在自动创建Webhook...")
-            webhook_url = await self.webhook_manager.create_webhook_for_channel(int(channel_id))
-            if webhook_url:
-                self.store.set_webhook_url(current_umo, webhook_url)
-                yield event.plain_result(
-                    f"✅ Webhook创建成功！\n"
-                    f"💡 转发的消息将以虚拟用户形式显示，\n"
-                    f"   显示原始发送者的头像和名字"
-                )
-            else:
-                yield event.plain_result(
-                    "❌ 自动创建Webhook失败\n"
-                    "💡 可能原因：\n"
-                    "   1. 机器人没有创建Webhook的权限\n"
-                    "   2. 未安装discord库\n"
-                    "   3. 请联系管理员手动创建Webhook并设置"
-                )
-        else:
-            # 手动设置Webhook URL
-            self.store.set_webhook_url(current_umo, action)
-            yield event.plain_result(
-                "✅ 已手动设置Webhook URL\n"
-                "💡 转发的消息将以虚拟用户形式显示"
-            )
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def forward_message(self, event: AstrMessageEvent):
@@ -426,7 +346,7 @@ class MsgTransfer(star.Star):
             virtual_username = DiscordWebhookManager.build_virtual_username(sender_name, source_platform)
             avatar_url = DiscordWebhookManager.get_avatar_url(source_platform, sender_id)
             
-            # 格式化消息内容
+            # 格式化消息内容（Discord会自动识别URL并显示图片）
             content = DiscordWebhookManager.format_message_content(message_chain)
             
             # 发送Webhook消息
