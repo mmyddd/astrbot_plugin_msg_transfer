@@ -1,14 +1,13 @@
 import json
-import os
 import secrets
 import string
 from pathlib import Path
 
+import astrbot.api.message_components as Comp
 import astrbot.api.star as star
 from astrbot.api.event import filter, AstrMessageEvent
-from astrbot.api.star import Context, Star
+from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
-from astrbot.core.message.components import BaseMessageComponent, Plain
 
 
 # ------------------------
@@ -16,22 +15,22 @@ from astrbot.core.message.components import BaseMessageComponent, Plain
 # ------------------------
 
 def load_json(path: Path) -> dict:
-    """简化版JSON加载"""
+    """加载JSON文件"""
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception as e:
-        logger.error(f"❌ 读取文件 {path} 失败: {e}")
+        logger.error(f"读取文件失败 {path}: {e}")
         return {}
 
 
 def save_json(path: Path, data: dict):
-    """简化版JSON保存"""
+    """保存JSON文件"""
     try:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        logger.error(f"❌ 写入文件 {path} 失败: {e}")
+        logger.error(f"写入文件失败 {path}: {e}")
 
 
 def gen_code(n=6):
@@ -85,7 +84,6 @@ class MsgTransferStore:
         if not self.pending_file.exists():
             self.pending_file.write_text("{}", encoding="utf-8")
 
-    # ----- rules -----
     def load_rules(self):
         return load_json(self.rule_file)
 
@@ -119,7 +117,6 @@ class MsgTransferStore:
         data = self.load_rules()
         return {rid: r for rid, r in data.items() if r["source_umo"] == source_umo}
 
-    # ----- pending -----
     def load_pending(self):
         return load_json(self.pending_file)
 
@@ -143,7 +140,14 @@ class MsgTransferStore:
 # ------------------------
 # 插件主体
 # ------------------------
-class MsgTransfer(star.Star):
+@register(
+    "astrbot_plugin_dis2qq_transfer",
+    "mmyddd",
+    "Discord和QQ之间消息转发插件",
+    "0.1.0",
+    "https://github.com/mmyddd/astrbot_plugin_msg_transfer"
+)
+class MsgTransfer(Star):
     def __init__(self, context: Context):
         super().__init__(context)
         self.data_dir = star.StarTools.get_data_dir("msg_transfer")
@@ -227,13 +231,10 @@ class MsgTransfer(star.Star):
         yield event.plain_result("\n".join(lines))
 
     @filter.event_message_type(filter.EventMessageType.ALL)
+    @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP | filter.PlatformAdapterType.DISCORD)
     async def forward_message(self, event: AstrMessageEvent):
         """主转发逻辑"""
         try:
-            # 仅处理QQ和Discord的消息
-            if event.get_platform_name() not in ["aiocqhttp", "discord"]:
-                return
-
             source_umo = str(event.unified_msg_origin)
             rules = self.store.list_rules(source_umo)
             
@@ -246,13 +247,15 @@ class MsgTransfer(star.Star):
                 target = rule["target_umo"]
                 try:
                     header = format_origin_header(event, source_umo)
-                    new_chain = [Plain(text=header)] + message_chain
-                    await self.context.send_message(target, event.chain_result(new_chain))
+                    # 构建新的消息链
+                    new_chain = [Comp.Plain(text=header)] + message_chain
+                    # 发送消息
+                    await self.context.send_message(target, new_chain)
                 except Exception as e:
-                    logger.error(f"❌ 转发失败 #{rid}: {e}")
+                    logger.error(f"转发失败 #{rid}: {e}")
 
         except Exception as e:
-            logger.error(f"❌ 转发逻辑异常: {e}")
+            logger.error(f"转发逻辑异常: {e}")
 
     async def terminate(self):
         logger.info("MsgTransfer plugin terminated")
