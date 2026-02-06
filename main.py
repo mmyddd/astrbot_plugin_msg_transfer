@@ -179,7 +179,6 @@ class MsgTransferStore:
                                 rule_id_part.endswith("_" + current_id_part) or
                                 current_id_part.endswith("_" + rule_id_part)):
                                 fuzzy_matches[rid] = rule
-                                logger.info(f"[FuzzyMatch] 模糊匹配规则 #{rid}: {rule_source} -> {source_umo}")
         
         except Exception as e:
             logger.error(f"[FuzzyMatch] 模糊匹配异常: {e}")
@@ -404,7 +403,7 @@ class MsgTransfer(star.Star):
                         quote_sender = seg.sender_name
                     break
 
-            # 替换消息链中的At(QQ)为对应名称
+            # 替换消息链中的At(QQ)为对应名称，并处理文件类型
             new_chain = []
             for seg in message_chain:
                 if seg.__class__.__name__ == "At" and hasattr(seg, "qq"):
@@ -412,8 +411,13 @@ class MsgTransfer(star.Star):
                     qq_name = mapping.get(qq_id, qq_id)
                     new_chain.append(Plain(f"@{qq_name} "))
                 elif seg.__class__.__name__ in ("Quote", "Reply"):
-                    # Discord不支持原生引用，转为文本前缀
                     continue  # 不直接转发引用段
+                elif hasattr(seg, "file") and hasattr(seg.file, "url") and seg.file.url:
+                    # 文件类型，转为直链
+                    new_chain.append(Plain(seg.file.url))
+                elif hasattr(seg, "url") and seg.url:
+                    # 可能是图片/文件/音频等，直接转为直链
+                    new_chain.append(Plain(seg.url))
                 else:
                     new_chain.append(seg)
 
