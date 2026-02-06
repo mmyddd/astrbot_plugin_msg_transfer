@@ -388,30 +388,37 @@ class MsgTransfer(star.Star):
             logger.error(f"❌ 处理规则 #{rid} 时发生异常: {e}")
     
     async def _forward_with_webhook(self, event: AstrMessageEvent, target_umo: str, message_chain, rule_id: str, webhook_url: str) -> bool:
-        """使用Webhook转发到Discord，创建虚拟用户"""
         try:
-            # 获取发送者信息
             sender_name = event.get_sender_name()
             sender_id = event.get_sender_id()
             source_platform = event.get_platform_name()
-            
+
+            # 加载QQ号-名称映射
+            mapping = self.store.load_mappings()
+
+            # 替换消息链中的At(QQ)为对应名称
+            new_chain = []
+            for seg in message_chain:
+                if seg.__class__.__name__ == "At" and hasattr(seg, "qq"):
+                    qq_id = str(seg.qq)
+                    qq_name = mapping.get(qq_id, qq_id)
+                    # Discord不支持At，直接用名称替代
+                    new_chain.append(Plain(f"@{qq_name} "))
+                else:
+                    new_chain.append(seg)
+
             # 构建虚拟用户信息
             virtual_username = DiscordWebhookManager.build_virtual_username(sender_name, source_platform)
             avatar_url = DiscordWebhookManager.get_avatar_url(source_platform, sender_id)
-            
-            # 格式化消息内容（Discord会自动识别URL并显示图片）
-            content = DiscordWebhookManager.format_message_content(message_chain)
-            
-            # 发送Webhook消息
+            content = DiscordWebhookManager.format_message_content(new_chain)
+
             success = await DiscordWebhookManager.send_webhook_message(
                 webhook_url=webhook_url,
                 username=virtual_username,
                 avatar_url=avatar_url,
                 content=content
             )
-            
             return success
-            
         except Exception as e:
             logger.error(f"❌ Webhook转发异常 #{rule_id}: {e}")
             return False
