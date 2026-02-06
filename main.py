@@ -12,7 +12,7 @@ from astrbot.api import logger
 import string
 
 from astrbot.core.message.components import BaseMessageComponent, Plain
-from .webhook import DiscordWebhookManager
+from .webhook import DiscordWebhookManager, UserMappingManager
 
 
 # ------------------------
@@ -97,10 +97,11 @@ def format_origin_header(event: AstrMessageEvent, umo: str):
 # 存储层（无锁简化）
 # ------------------------
 class MsgTransferStore:
-    def __init__(self, rule_file: Path, pending_file: Path, webhook_file: Path):
+    def __init__(self, rule_file: Path, pending_file: Path, webhook_file: Path, user_mapping_file: Path):
         self.rule_file = rule_file
         self.pending_file = pending_file
         self.webhook_file = webhook_file
+        self.user_mapping_file = user_mapping_file
         self._ensure_files()
 
     def _ensure_files(self):
@@ -237,9 +238,11 @@ class MsgTransfer(star.Star):
         self.rule_file = self.data_dir / "rules.json"
         self.pending_file = self.data_dir / "pending.json"
         self.webhook_file = self.data_dir / "webhooks.json"
+        self.user_mapping_file = self.data_dir / "user_mapping.json"
 
-        self.store = MsgTransferStore(self.rule_file, self.pending_file, self.webhook_file)
+        self.store = MsgTransferStore(self.rule_file, self.pending_file, self.webhook_file, self.user_mapping_file)
         self.webhook_manager = DiscordWebhookManager(context)
+        self.user_mapping_manager = UserMappingManager(self.user_mapping_file)
 
     async def initialize(self):
         logger.info("MsgTransfer plugin init OK")
@@ -318,6 +321,92 @@ class MsgTransfer(star.Star):
             lines.append(f"#{rid}")
         yield event.plain_result("\n".join(lines))
 
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @mt.command("map")
+    async def cmd_map(self, event: AstrMessageEvent, source_platform: str, source_user_id: str, target_platform: str, target_user_id: str):
+        """添加用户映射关系
+        用法: #mt map <源平台> <源用户ID> <目标平台> <目标用户ID>
+        示例: #mt map qq 123456 discord 789012"""
+        try:
+            success = self.user_mapping_manager.add_mapping(source_platform, source_user_id, target_platform, target_user_id)
+            if success:
+                yield event.plain_result(f"✅ 已添加用户映射: {source_platform}:{source_user_id} -> {target_platform}:{target_user_id}")
+            else:
+                yield event.plain_result(f"❌ 添加用户映射失败")
+        except Exception as e:
+            yield event.plain_result(f"❌ 添加用户映射异常: {e}")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @mt.command("unmap")
+    async def cmd_unmap(self, event: AstrMessageEvent, source_platform: str, source_user_id: str, target_platform: str):
+        """删除用户映射关系
+        用法: #mt unmap <源平台> <源用户ID> <目标平台>
+        示例: #mt unmap qq 123456 discord"""
+        try:
+            success = self.user_mapping_manager.remove_mapping(source_platform, source_user_id, target_platform)
+            if success:
+                yield event.plain_result(f"✅ 已删除用户映射: {source_platform}:{source_user_id} -> {target_platform}")
+            else:
+                yield event.plain_result(f"❌ 删除用户映射失败或不存在")
+        except Exception as e:
+            yield event.plain_result(f"❌ 删除用户映射异常: {e}")
+
+    @mt.command("maps")
+    async def cmd_maps(self, event: AstrMessageEvent):
+        """列出所有用户映射关系"""
+        try:
+            mapping_data = self.user_mapping_manager.load_mappings()
+            if not mapping_data:
+                yield event.plain_result("📭 当前没有用户映射关系")
+                return
+
+            lines = [f"👥 用户映射关系（{len(mapping_data)}条）"]
+            for source_key, targets in mapping_data.items():
+                try:
+                    source_platform, source_user_id = source_key.split(":", 1)
+                    for target_platform, target_user_id in targets.items():
+                        lines.append(f"{source_platform}:{source_user_id} -> {target_platform}:{target_user_id}")
+                except ValueError:
+                    # 跳过格式错误的条目
+                    continue
+            
+            if len(lines) > 1:
+                yield event.plain_result("\n".join(lines))
+            else:
+                yield event.plain_result("📭 当前没有有效的用户映射关系")
+        except Exception as e:
+            yield event.plain_result(f"❌ 获取用户映射列表异常: {e}")
+
+    @mt.command("import_maps")
+    async def cmd_import_maps(self, event: AstrMessageEvent):
+        """导入用户映射示例文件"""
+        try:
+            # 检查示例文件是否存在
+            example_file = self.data_dir / "user_mapping_example.json"
+            if not example_file.exists():
+                yield event.plain_result("❌ 用户映射示例文件不存在")
+                return
+            
+            # 读取示例文件
+            example_data = load_json(example_file)
+            
+            # 合并到现有映射中
+            current_data = self.user_mapping_manager.load_mappings()
+            
+            added_count = 0
+            for source_key, targets in example_data.items():
+                if source_key not in current_data:
+                    current_data[source_key] = {}
+                for target_platform, target_user_id in targets.items():
+                    if target_platform not in current_data[source_key]:
+                        current_data[source_key][target_platform] = target_user_id
+                        added_count += 1
+            
+            self.user_mapping_manager.save_mappings(current_data)
+            yield event.plain_result(f"✅ 已导入 {added_count} 条用户映射关系")
+        except Exception as e:
+            yield event.plain_result(f"❌ 导入用户映射异常: {e}")
+
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def forward_message(self, event: AstrMessageEvent):
         """主转发逻辑 - 并行处理所有转发规则"""
@@ -379,12 +468,27 @@ class MsgTransfer(star.Star):
             sender_id = event.get_sender_id()
             source_platform = event.get_platform_name()
             
-            # 构建虚拟用户信息
-            virtual_username = DiscordWebhookManager.build_virtual_username(sender_name, source_platform)
-            avatar_url = DiscordWebhookManager.get_avatar_url(source_platform, sender_id)
+            # 自动创建映射表（如果不存在）
+            DiscordWebhookManager.auto_create_mapping_if_needed(
+                self.user_mapping_manager,
+                source_platform,
+                sender_id,
+                "discord",
+                "webhook"  # Discord Webhook 使用特殊的虚拟用户ID
+            )
             
-            # 格式化消息内容（Discord会自动识别URL并显示图片）
+            # 转换@消息格式
             content = DiscordWebhookManager.format_message_content(message_chain)
+            content = UserMappingManager.convert_at_mentions(
+                content, 
+                self.user_mapping_manager, 
+                reverse_direction=False  # QQ -> Discord
+            )
+            
+            # 使用映射后的用户ID构建虚拟用户信息
+            mapped_sender_id = self.user_mapping_manager.get_mapped_user_id(source_platform, sender_id, "discord")
+            virtual_username = DiscordWebhookManager.build_virtual_username(sender_name, source_platform)
+            avatar_url = DiscordWebhookManager.get_avatar_url(source_platform, mapped_sender_id)
             
             # 发送Webhook消息
             success = await DiscordWebhookManager.send_webhook_message(
