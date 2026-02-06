@@ -202,6 +202,50 @@ class DiscordWebhookManager:
         return content
     
     @staticmethod
+    async def format_message_content_async(message_chain) -> str:
+        """异步格式化消息内容，避免同步访问 <File>.file，自动补全fname参数，保证下载体验"""
+        text_parts = []
+        image_urls = []
+        for component in message_chain:
+            # 处理文本
+            if hasattr(component, 'text') and component.text:
+                text_parts.append(component.text)
+            # 处理@消息
+            elif hasattr(component, 'qq') and component.qq:
+                text_parts.append(f"<@{component.qq}>")
+            # 处理文件类型，自动补全fname参数，异步获取url和name
+            elif hasattr(component, 'get_file') and callable(component.get_file):
+                try:
+                    file_obj = await component.get_file()
+                    file_url = getattr(file_obj, 'url', None)
+                    file_name = getattr(file_obj, 'name', None)
+                    if file_url:
+                        # 针对QQ/企微等ftn_handler直链，自动补全fname参数
+                        if file_name and 'ftn.qq.com/ftn_handler/' in file_url:
+                            if 'fname=' not in file_url or file_url.endswith('fname='):
+                                from urllib.parse import quote
+                                safe_name = quote(file_name)
+                                if '?' in file_url:
+                                    file_url = file_url.split('?')[0] + f'?fname={safe_name}'
+                                else:
+                                    file_url = file_url + f'?fname={safe_name}'
+                        text_parts.append(f"[文件：{file_name}]({file_url})\n{file_url}" if file_name else file_url)
+                except Exception as e:
+                    text_parts.append("[文件获取失败]")
+            # 处理URL（图片/文件/资源）
+            elif hasattr(component, 'url') and component.url:
+                image_urls.append(component.url)
+            elif hasattr(component, 'src') and component.src:
+                image_urls.append(component.src)
+        # 文本和图片分开，图片url每个单独一行
+        content = ''.join(text_parts)
+        if image_urls:
+            if content and not content.endswith('\n'):
+                content += '\n'
+            content += '\n'.join(image_urls)
+        return content
+    
+    @staticmethod
     async def send_webhook_message(
         webhook_url: str,
         username: str,

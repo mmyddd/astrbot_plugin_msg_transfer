@@ -427,7 +427,7 @@ class MsgTransfer(star.Star):
             # 构建虚拟用户信息
             virtual_username = DiscordWebhookManager.build_virtual_username(sender_name, source_platform)
             avatar_url = DiscordWebhookManager.get_avatar_url(source_platform, sender_id)
-            content = DiscordWebhookManager.format_message_content(new_chain)
+            content = DiscordWebhookManager.format_message_content_async(new_chain)
             if quote_block:
                 content = quote_block + content
 
