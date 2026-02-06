@@ -1,65 +1,47 @@
 import json
 import os
 import secrets
+import string
 from pathlib import Path
 
 import astrbot.api.star as star
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star
 from astrbot.api import logger
-
-import string
-
 from astrbot.core.message.components import BaseMessageComponent, Plain
 
 
 # ------------------------
-# 工具与数据路径
+# 工具函数
 # ------------------------
 
-
 def load_json(path: Path) -> dict:
+    """简化版JSON加载"""
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
-    except FileNotFoundError:
-        logger.error("❌ 文件不存在！本次创建空 JSON！")
-        return {}
-    except json.JSONDecodeError as e:
-        logger.error(f"❌ 文件 {path} 不是有效 JSON: {e}")
-        raise ValueError(f"❌ 文件 {path} 不是有效 JSON: {e}") from e
-    except OSError as e:
-        logger.error(f"❌ 读取文件 {path} 失败: {e}")
-        raise RuntimeError(f"❌ 读取文件 {path} 失败: {e}") from e
     except Exception as e:
-        logger.error(f"❌ 发生预期外的 JSON 读取错误: {e}！")
-        raise RuntimeError(f"❌ 发生预期外的 JSON 读取错误: {e}！")
+        logger.error(f"❌ 读取文件 {path} 失败: {e}")
+        return {}
 
 
 def save_json(path: Path, data: dict):
+    """简化版JSON保存"""
     try:
-        tmp = path.with_suffix(".tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
+        with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-        tmp.replace(path)
-    except OSError as e:
-        logger.error(f"❌ 写入文件 {path} 失败: {e}")
-        raise RuntimeError(f"❌ 写入文件 {path} 失败: {e}") from e
-    except TypeError as e:
-        logger.error(f"❌ 数据无法序列化为 JSON: {e}")
-        raise ValueError(f"❌ 数据无法序列化为 JSON: {e}") from e
     except Exception as e:
-        logger.error(f"❌ 发生预期外的 JSON 写入错误: {e}")
-        raise RuntimeError(f"❌ 发生预期外的 JSON 写入错误: {e}") from e
+        logger.error(f"❌ 写入文件 {path} 失败: {e}")
 
 
 def gen_code(n=6):
-    # 使用 secrets 模块生成更安全的随机字符串
+    """生成绑定码"""
     alphabet = string.ascii_lowercase + string.digits
     return ''.join(secrets.choice(alphabet) for _ in range(n))
 
 
 def format_origin_header(event: AstrMessageEvent, umo: str):
+    """格式化转发消息头部（仅支持Discord和QQ）"""
     try:
         _, msg_type, conversation_id = umo.split(":", 2)
     except ValueError:
@@ -70,31 +52,26 @@ def format_origin_header(event: AstrMessageEvent, umo: str):
     sender_name = event.get_sender_name()
     sender_id = event.get_sender_id()
 
-    # 平台友好名称
+    # 仅支持Discord和QQ
     source_platform_map = {
         "aiocqhttp": "QQ",
-        "wechatpadpro": "微信",
-        "telegram": "Telegram",
         "discord": "Discord",
     }
     source_platform_human = source_platform_map.get(source_platform, source_platform)
 
-    # 消息类型友好名称
+    # 消息类型
     if msg_type == "GroupMessage":
-        msg_type_human = f"群组（ID: {conversation_id}）消息"
+        msg_type_human = f"群组（{conversation_id}）"
     elif msg_type == "FriendMessage":
-        msg_type_human = f"私聊（对方 ID: {conversation_id}）消息"
+        msg_type_human = f"私聊（{conversation_id}）"
     else:
-        msg_type_human = f"未知类型（ID: {conversation_id}）消息"
+        msg_type_human = f"未知类型（{conversation_id}）"
 
-    return (
-        f"[转发] {sender_name} ({sender_id})\n"
-        f"来自 {source_platform_human} 的 {msg_type_human}"
-    )
+    return f"[转发] {sender_name}({sender_id}) - 来自{source_platform_human}的{msg_type_human}\n"
 
 
 # ------------------------
-# 存储层（无锁简化）
+# 存储层
 # ------------------------
 class MsgTransferStore:
     def __init__(self, rule_file: Path, pending_file: Path):
@@ -117,7 +94,7 @@ class MsgTransferStore:
 
     def add_rule(self, source_umo: str, target_umo: str) -> str:
         data = self.load_rules()
-
+        
         # 查重
         for rid, rule in data.items():
             if rule["source_umo"] == source_umo and rule["target_umo"] == target_umo:
@@ -169,11 +146,9 @@ class MsgTransferStore:
 class MsgTransfer(star.Star):
     def __init__(self, context: Context):
         super().__init__(context)
-        # 使用 AstrBot 提供的标准方法获取项目持久化数据存储目录
         self.data_dir = star.StarTools.get_data_dir("msg_transfer")
         self.rule_file = self.data_dir / "rules.json"
         self.pending_file = self.data_dir / "pending.json"
-
         self.store = MsgTransferStore(self.rule_file, self.pending_file)
 
     async def initialize(self):
@@ -187,7 +162,12 @@ class MsgTransfer(star.Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @mt.command("add")
     async def cmd_add(self, event: AstrMessageEvent):
-        """创建一则消息转发绑定的请求"""
+        """创建转发绑定请求"""
+        # 检查平台是否支持
+        if event.get_platform_name() not in ["aiocqhttp", "discord"]:
+            yield event.plain_result("❌ 仅支持QQ和Discord平台")
+            return
+
         code = gen_code()
         source_umo = str(event.unified_msg_origin)
         self.store.add_pending(code, source_umo)
@@ -200,10 +180,22 @@ class MsgTransfer(star.Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @mt.command("bind")
     async def cmd_bind(self, event: AstrMessageEvent, code: str):
-        """接受一则消息转发绑定的请求"""
+        """接受转发绑定请求"""
+        # 检查平台是否支持
+        if event.get_platform_name() not in ["aiocqhttp", "discord"]:
+            yield event.plain_result("❌ 仅支持QQ和Discord平台")
+            return
+
         try:
             target_umo = str(event.unified_msg_origin)
             source_umo = self.store.pop_pending(code)
+            
+            # 验证源平台
+            source_platform = source_umo.split(":")[0]
+            if source_platform not in ["aiocqhttp", "discord"]:
+                yield event.plain_result("❌ 源会话平台不支持，仅支持QQ和Discord")
+                return
+            
             rid = self.store.add_rule(source_umo, target_umo)
             yield event.plain_result(f"✅ 已绑定 #{rid}\n{source_umo} → {target_umo}")
         except Exception as e:
@@ -212,7 +204,7 @@ class MsgTransfer(star.Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @mt.command("del")
     async def cmd_del(self, event: AstrMessageEvent, rid: str):
-        """删除一条转发规则"""
+        """删除转发规则"""
         try:
             self.store.delete_rule(rid)
             yield event.plain_result(f"🗑️ 已删除规则 #{rid}")
@@ -221,14 +213,15 @@ class MsgTransfer(star.Star):
 
     @mt.command("list")
     async def cmd_list(self, event: AstrMessageEvent):
-        """列出与当前会话相关的所有转发规则"""
+        """列出当前会话的转发规则"""
         source_umo = str(event.unified_msg_origin)
         rules = self.store.list_rules(source_umo)
+        
         if not rules:
             yield event.plain_result("📭 当前会话没有规则")
             return
 
-        lines = [f"📜 当前会话({source_umo}) 的规则："]
+        lines = [f"📜 当前会话规则："]
         for rid, r in rules.items():
             lines.append(f"#{rid} {r['source_umo']} → {r['target_umo']}")
         yield event.plain_result("\n".join(lines))
@@ -237,8 +230,13 @@ class MsgTransfer(star.Star):
     async def forward_message(self, event: AstrMessageEvent):
         """主转发逻辑"""
         try:
+            # 仅处理QQ和Discord的消息
+            if event.get_platform_name() not in ["aiocqhttp", "discord"]:
+                return
+
             source_umo = str(event.unified_msg_origin)
             rules = self.store.list_rules(source_umo)
+            
             if not rules:
                 return
 
@@ -248,12 +246,8 @@ class MsgTransfer(star.Star):
                 target = rule["target_umo"]
                 try:
                     header = format_origin_header(event, source_umo)
-                    header += "\n\n\u200b"
-
-                    new_chain = list[BaseMessageComponent]([Plain(text=header)]) + message_chain
+                    new_chain = [Plain(text=header)] + message_chain
                     await self.context.send_message(target, event.chain_result(new_chain))
-                except ValueError as e:
-                    logger.error(f"❌ 不合法的 session 字符串，转发失败 #{rid}: {e}")
                 except Exception as e:
                     logger.error(f"❌ 转发失败 #{rid}: {e}")
 
