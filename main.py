@@ -241,15 +241,16 @@ class MsgTransfer(Star):
             if not rules:
                 return
 
+            # 获取消息链
             message_chain = event.get_messages()
 
             for rid, rule in rules.items():
                 target = rule["target_umo"]
                 try:
                     header = format_origin_header(event, source_umo)
-                    # 构建新的消息链
-                    new_chain = [Comp.Plain(text=header)] + message_chain
-                    # 发送消息
+                    # 构建新的消息链，添加转发头
+                    new_chain = [Comp.Plain(text=header)] + list(message_chain)
+                    # 发送消息到目标会话
                     await self.context.send_message(target, new_chain)
                 except Exception as e:
                     logger.error(f"转发失败 #{rid}: {e}")
