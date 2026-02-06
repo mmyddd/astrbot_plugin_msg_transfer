@@ -420,8 +420,21 @@ class MsgTransfer(star.Star):
             # 构建引用文本（如有）
             quote_block = None
             if quote_text:
-                # 优先用 quote_sender，没有则兜底用 sender_name
-                display_sender = quote_sender if quote_sender else sender_name
+                # 优先用 quote_sender，其次mapping查找ID昵称，最后用ID兜底
+                display_sender = None
+                if quote_sender:
+                    display_sender = quote_sender
+                else:
+                    # 尝试从引用段获取qq/user_id
+                    quote_id = None
+                    if hasattr(seg, "qq"):
+                        quote_id = str(seg.qq)
+                    elif hasattr(seg, "user_id"):
+                        quote_id = str(seg.user_id)
+                    if quote_id:
+                        display_sender = mapping.get(quote_id, quote_id)
+                if not display_sender:
+                    display_sender = "未知用户"
                 quote_block = f"> **{display_sender}**: {quote_text}\n"
 
             # 构建虚拟用户信息
