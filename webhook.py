@@ -262,9 +262,9 @@ class DiscordWebhookManager:
             return None
     
     @staticmethod
-    def get_qq_avatar_url(qq_id: str) -> str:
+    def get_qq_avatar_url(original_qq_id: str) -> str:
         """获取QQ用户头像URL"""
-        return f"http://q1.qlogo.cn/g?b=qq&nk={qq_id}&s=100"
+        return f"http://q1.qlogo.cn/g?b=qq&nk={original_qq_id}&s=100"
     
     @staticmethod
     def get_discord_avatar_url(discord_id: str) -> str:
