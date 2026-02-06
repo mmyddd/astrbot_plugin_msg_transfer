@@ -430,10 +430,9 @@ class MsgTransfer(star.Star):
             # 构建引用文本（如有）
             quote_block = None
             if quote_text:
-                if quote_sender:
-                    quote_block = f"> **{quote_sender}**: {quote_text}\n"
-                else:
-                    quote_block = f"> {quote_text}\n"
+                # 优先用 quote_sender，没有则兜底用 sender_name
+                display_sender = quote_sender if quote_sender else sender_name
+                quote_block = f"> **{display_sender}**: {quote_text}\n"
 
             # 构建虚拟用户信息
             virtual_username = DiscordWebhookManager.build_virtual_username(sender_name, source_platform)
