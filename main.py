@@ -433,8 +433,6 @@ class MsgTransfer(star.Star):
                         quote_id = str(seg.user_id)
                     if quote_id:
                         display_sender = mapping.get(quote_id, quote_id)
-                if not display_sender:
-                    display_sender = "未知用户"
                 quote_block = f"> **{display_sender}**: {quote_text}\n"
 
             # 构建虚拟用户信息
