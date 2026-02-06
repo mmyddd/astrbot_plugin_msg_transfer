@@ -420,7 +420,11 @@ class MsgTransfer(star.Star):
             # 构建引用文本（如有）
             quote_block = None
             if quote_text:
-                quote_block = f"> {quote_text}\n"
+                # 检查quote_text是否为图片链接，如果是则单独一行，否则正常引用
+                if (quote_text.startswith('http://') or quote_text.startswith('https://')) and (quote_text.endswith('.jpg') or quote_text.endswith('.png') or quote_text.endswith('.jpeg') or quote_text.endswith('.gif') or quote_text.endswith('.webp')):
+                    quote_block = f"> [图片]({quote_text})\n"
+                else:
+                    quote_block = f"> {quote_text}\n"
 
             # 构建虚拟用户信息
             virtual_username = DiscordWebhookManager.build_virtual_username(sender_name, source_platform)
