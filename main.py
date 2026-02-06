@@ -97,10 +97,11 @@ def format_origin_header(event: AstrMessageEvent, umo: str):
 # 存储层（无锁简化）
 # ------------------------
 class MsgTransferStore:
-    def __init__(self, rule_file: Path, pending_file: Path, webhook_file: Path):
+    def __init__(self, rule_file: Path, pending_file: Path, webhook_file: Path, mapping_file: Path):
         self.rule_file = rule_file
         self.pending_file = pending_file
         self.webhook_file = webhook_file
+        self.mapping_file = mapping_file
         self._ensure_files()
 
     def _ensure_files(self):
@@ -110,6 +111,8 @@ class MsgTransferStore:
             self.pending_file.write_text("{}", encoding="utf-8")
         if not self.webhook_file.exists():
             self.webhook_file.write_text("{}", encoding="utf-8")
+        if not self.mapping_file.exists():
+            self.mapping_file.write_text("{}", encoding="utf-8")
 
     # ----- rules -----
     def load_rules(self):
@@ -225,6 +228,13 @@ class MsgTransferStore:
             del data[target_umo]
             self.save_webhooks(data)
 
+    # ----- mapping -----
+    def load_mappings(self):
+        return load_json(self.mapping_file)
+
+    def save_mappings(self, data: dict):
+        save_json(self.mapping_file, data)
+
 
 # ------------------------
 # 插件主体
@@ -237,8 +247,9 @@ class MsgTransfer(star.Star):
         self.rule_file = self.data_dir / "rules.json"
         self.pending_file = self.data_dir / "pending.json"
         self.webhook_file = self.data_dir / "webhooks.json"
+        self.mapping_file = self.data_dir / "mappings.json"
 
-        self.store = MsgTransferStore(self.rule_file, self.pending_file, self.webhook_file)
+        self.store = MsgTransferStore(self.rule_file, self.pending_file, self.webhook_file, self.mapping_file)
         self.webhook_manager = DiscordWebhookManager(context)
 
     async def initialize(self):
@@ -346,22 +357,27 @@ class MsgTransfer(star.Star):
     async def _forward_single_rule(self, event: AstrMessageEvent, rule: dict, rid: str, source_umo: str, message_chain):
         """处理单个转发规则"""
         try:
+            # 自动记录QQ号和名称到 mapping_file
+            platform = event.get_platform_name()
+            if platform in ["aiocqhttp", "qqofficial"]:
+                qq_id = event.get_sender_id()
+                qq_name = event.get_sender_name()
+                # 读取现有映射
+                mapping = self.store.load_mappings()
+                if mapping.get(qq_id) != qq_name:
+                    mapping[qq_id] = qq_name
+                    self.store.save_mappings(mapping)
+                    logger.info(f"转发时已更新QQ号 {qq_id} 的名称: {mapping.get(qq_id)} -> {qq_name}")
+
             target = rule["target_umo"]
-            
-            # 尝试使用Webhook转发（如果有配置）
             webhook_url = self.store.get_webhook_url(target)
-            
             if webhook_url:
-                # 使用Webhook转发
                 success = await self._forward_with_webhook(event, target, message_chain, rid, webhook_url)
                 if success:
-                    return  # Webhook成功，跳过普通转发
-            
-            # 普通转发（如果没有Webhook或Webhook失败）
+                    return
             try:
                 header = format_origin_header(event, source_umo)
                 header += "\n\n\u200b"
-
                 new_chain = list[BaseMessageComponent]([Plain(text=header)]) + message_chain
                 await self.context.send_message(target, event.chain_result(new_chain))
             except ValueError as e:
