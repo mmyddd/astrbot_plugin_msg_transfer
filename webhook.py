@@ -3,16 +3,18 @@ import aiohttp
 from astrbot.api import logger
 from astrbot.core.star.star import star_map
 
+import discord  # Pycord
+
 try:
     import discord
     HAS_DISCORD = True
 except ImportError:
     HAS_DISCORD = False
-    logger.warning("未安装discord库，自动创建Webhook功能不可用")
+    logger.warning("未安装py-cord库，自动创建Webhook功能不可用")
 
 
 class DiscordWebhookManager:
-    """Discord Webhook管理器"""
+    """Discord Webhook管理器 (Pycord版)"""
     
     def __init__(self, context=None):
         self._discord_client = None
@@ -100,7 +102,7 @@ class DiscordWebhookManager:
             Webhook URL，如果创建失败返回None
         """
         if not HAS_DISCORD:
-            logger.error("❌ 未安装discord库，无法自动创建Webhook")
+            logger.error("❌ 未安装py-cord库，无法自动创建Webhook")
             return None
         
         client = self._get_discord_client()
@@ -114,11 +116,6 @@ class DiscordWebhookManager:
             channel = client.get_channel(channel_id)
             if not channel:
                 logger.error(f"❌ 无法获取频道 {channel_id}")
-                return None
-            
-            # 检查是否可以创建Webhook
-            if not hasattr(channel, 'create_webhook'):
-                logger.error(f"❌ 频道 {channel_id} 不支持创建Webhook")
                 return None
             
             # 创建Webhook
@@ -167,29 +164,30 @@ class DiscordWebhookManager:
     
     @staticmethod
     def format_message_content(message_chain) -> str:
-        """格式化消息内容为文本
-        
-        Returns:
-            str: 文本内容（Discord会自动识别URL并显示图片）
-        """
-        content_parts = []
+        """格式化消息内容为文本+图片分离，图片url单独一行，保证图片和文本都完整显示"""
+        text_parts = []
+        image_urls = []
         for component in message_chain:
             # 处理文本
             if hasattr(component, 'text') and component.text:
-                content_parts.append(component.text)
+                text_parts.append(component.text)
             # 处理@消息
             elif hasattr(component, 'qq') and component.qq:
-                content_parts.append(f"<@{component.qq}>")
-            # 处理URL（Discord会自动识别并显示图片）
+                text_parts.append(f"<@{component.qq}>")
+            # 处理URL（图片/文件/资源）
             elif hasattr(component, 'url') and component.url:
-                content_parts.append(component.url)
-            # 处理其他可能包含URL的组件
-            elif hasattr(component, 'file') and hasattr(component.file, 'url'):
-                content_parts.append(component.file.url)
-            elif hasattr(component, 'src'):
-                content_parts.append(component.src)
-        
-        return "".join(content_parts)
+                image_urls.append(component.url)
+            elif hasattr(component, 'file') and hasattr(component.file, 'url') and component.file.url:
+                image_urls.append(component.file.url)
+            elif hasattr(component, 'src') and component.src:
+                image_urls.append(component.src)
+        # 文本和图片分开，图片url每个单独一行
+        content = ''.join(text_parts)
+        if image_urls:
+            if content and not content.endswith('\n'):
+                content += '\n'
+            content += '\n'.join(image_urls)
+        return content
     
     @staticmethod
     async def send_webhook_message(

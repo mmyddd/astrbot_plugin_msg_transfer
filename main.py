@@ -331,26 +331,16 @@ class MsgTransfer(star.Star):
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def forward_message(self, event: AstrMessageEvent):
-        """主转发逻辑 - 并行处理所有转发规则"""
+        """主转发逻辑 - 顺序队列处理所有转发规则，保证顺序一致"""
         try:
             source_umo = str(event.unified_msg_origin)
-            
             rules = self.store.list_rules(source_umo)
-            
             if not rules:
                 return
-
             message_chain = event.get_messages()
-
-            # 并行处理所有转发规则
-            tasks = []
+            # 顺序依次await每个转发，保证顺序
             for rid, rule in rules.items():
-                task = self._forward_single_rule(event, rule, rid, source_umo, message_chain)
-                tasks.append(task)
-            
-            # 使用gather并行执行所有转发任务
-            await asyncio.gather(*tasks, return_exceptions=True)
-
+                await self._forward_single_rule(event, rule, rid, source_umo, message_chain)
         except Exception as e:
             logger.error(f"❌ 转发逻辑异常: {e}", exc_info=True)
 
