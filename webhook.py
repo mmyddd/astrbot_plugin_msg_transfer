@@ -267,13 +267,14 @@ class DiscordWebhookManager:
             # Discord不允许content和embeds都为空，但允许content为空
             if not content:
                 content = "\u200b"  # 零宽空格
-            
+            # 如果 content 是协程，需 await 获取内容
+            if hasattr(content, "__await__"):
+                content = await content
             payload = {
                 "content": content,
                 "username": username,
                 "avatar_url": avatar_url
             }
-            
             async with aiohttp.ClientSession() as session:
                 async with session.post(webhook_url, json=payload) as resp:
                     if resp.status in [200, 204, 201]:  # 200, 204, 201都表示成功
