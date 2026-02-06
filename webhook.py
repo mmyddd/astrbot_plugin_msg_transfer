@@ -161,46 +161,7 @@ class DiscordWebhookManager:
             return DiscordWebhookManager.get_discord_avatar_url(user_id)
         else:
             return DiscordWebhookManager.get_default_avatar_url()
-    
-    @staticmethod
-    def format_message_content(message_chain) -> str:
-        """格式化消息内容为文本+图片分离，图片url单独一行，文件链接自动补全fname参数，保证下载体验"""
-        text_parts = []
-        image_urls = []
-        for component in message_chain:
-            # 处理文本
-            if hasattr(component, 'text') and component.text:
-                text_parts.append(component.text)
-            # 处理@消息
-            elif hasattr(component, 'qq') and component.qq:
-                text_parts.append(f"<@{component.qq}>")
-            # 处理文件类型，自动补全fname参数
-            elif hasattr(component, 'file') and hasattr(component.file, 'url') and component.file.url:
-                file_url = component.file.url
-                file_name = getattr(component.file, "name", None)
-                # 针对QQ/企微等ftn_handler直链，自动补全fname参数
-                if file_name and 'ftn.qq.com/ftn_handler/' in file_url:
-                    if 'fname=' not in file_url or file_url.endswith('fname='):
-                        from urllib.parse import quote
-                        safe_name = quote(file_name)
-                        if '?' in file_url:
-                            file_url = file_url.split('?')[0] + f'?fname={safe_name}'
-                        else:
-                            file_url = file_url + f'?fname={safe_name}'
-                text_parts.append(f"[文件：{file_name}]({file_url})\n{file_url}" if file_name else file_url)
-            # 处理URL（图片/文件/资源）
-            elif hasattr(component, 'url') and component.url:
-                image_urls.append(component.url)
-            elif hasattr(component, 'src') and component.src:
-                image_urls.append(component.src)
-        # 文本和图片分开，图片url每个单独一行
-        content = ''.join(text_parts)
-        if image_urls:
-            if content and not content.endswith('\n'):
-                content += '\n'
-            content += '\n'.join(image_urls)
-        return content
-    
+        
     @staticmethod
     async def format_message_content_async(message_chain) -> str:
         """异步格式化消息内容，避免同步访问 <File>.file，自动补全fname参数，保证下载体验"""
@@ -229,7 +190,10 @@ class DiscordWebhookManager:
                                     file_url = file_url.split('?')[0] + f'?fname={safe_name}'
                                 else:
                                     file_url = file_url + f'?fname={safe_name}'
-                        text_parts.append(f"[文件：{file_name}]({file_url})\n{file_url}" if file_name else file_url)
+                        # 保证直链一定被加入 image_urls（这样能在 Discord 里直接点开）
+                        image_urls.append(file_url)
+                        # 也保留文件名说明
+                        text_parts.append(f"[文件：{file_name}]({file_url})" if file_name else file_url)
                 except Exception as e:
                     text_parts.append("[文件获取失败]")
             # 处理URL（图片/文件/资源）
