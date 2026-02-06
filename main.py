@@ -413,8 +413,13 @@ class MsgTransfer(star.Star):
                 elif seg.__class__.__name__ in ("Quote", "Reply"):
                     continue  # 不直接转发引用段
                 elif hasattr(seg, "file") and hasattr(seg.file, "url") and seg.file.url:
-                    # 文件类型，转为直链
-                    new_chain.append(Plain(seg.file.url))
+                    # 文件类型，带文件名
+                    file_url = seg.file.url
+                    file_name = getattr(seg.file, "name", None)
+                    if file_name:
+                        new_chain.append(Plain(f"文件：{file_name}\n链接：{file_url}"))
+                    else:
+                        new_chain.append(Plain(file_url))
                 elif hasattr(seg, "url") and seg.url:
                     # 可能是图片/文件/音频等，直接转为直链
                     new_chain.append(Plain(seg.url))
