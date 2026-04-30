@@ -1,4 +1,5 @@
 """Discord Webhook管理模块"""
+import asyncio
 import re
 import urllib.parse
 import aiohttp
@@ -26,11 +27,13 @@ class DiscordWebhookManager:
         self._discord_client = None
         self._context = context
         self._session: aiohttp.ClientSession | None = None
+        self._session_lock = asyncio.Lock()
 
     async def _get_session(self) -> aiohttp.ClientSession:
-        if self._session is None or self._session.closed:
-            timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECONDS)
-            self._session = aiohttp.ClientSession(timeout=timeout)
+        async with self._session_lock:
+            if self._session is None or self._session.closed:
+                timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECONDS)
+                self._session = aiohttp.ClientSession(timeout=timeout)
         return self._session
 
     async def close(self):
@@ -42,6 +45,10 @@ class DiscordWebhookManager:
     def set_context(self, context):
         """设置context，用于获取Discord客户端"""
         self._context = context
+
+    def set_discord_client(self, client):
+        """显式设置 Discord 客户端实例（替代自动搜索）"""
+        self._discord_client = client
 
     def _try_extract_discord_client(self, platform_inst) -> bool:
         """检查 platform_inst 是否持有 Discord 客户端，若是则缓存"""
@@ -85,11 +92,13 @@ class DiscordWebhookManager:
                 return self._discord_client
 
         # 回退：遍历所有 star 实例
+        logger.debug("通过 star_map 搜索 Discord 客户端")
         for star_instance in star_map.values():
             if hasattr(star_instance, 'context') and hasattr(star_instance.context, 'platform_manager'):
                 if self._search_platform_insts(star_instance.context.platform_manager):
                     return self._discord_client
 
+        logger.debug("未找到 Discord 客户端")
         return None
 
     def get_discord_client(self):
@@ -184,6 +193,12 @@ class DiscordWebhookManager:
                 text_parts.append(component.text)
             elif hasattr(component, 'qq') and component.qq:
                 text_parts.append(f"<@{component.qq}>")
+            elif component.__class__.__name__ == "Image":
+                img_url = getattr(component, 'url', None)
+                if img_url:
+                    extra_lines.append(img_url)
+                else:
+                    text_parts.append("[图片]")
             elif component.__class__.__name__ == "File":
                 name = component.name or "文件"
                 file_url = component.url or ""
