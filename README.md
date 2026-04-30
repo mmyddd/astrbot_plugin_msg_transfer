@@ -1,141 +1,124 @@
 # MsgTransfer —— AstrBot 跨平台消息转发插件
 
-一个 **简洁、稳健、可扩展** 的 AstrBot 跨平台消息转发插件，用于在不同聊天平台之间同步消息、桥接群聊，让多个平台之间能够像“同一个群”一样互动。
+> **本仓库基于 [Siaospeed/astrbot_plugin_msg_transfer](https://github.com/Siaospeed/astrbot_plugin_msg_transfer) 进行 fork 改动，遵守 AGPL-3.0 许可证。**
 
-本插件理论上适用于任意 AstrBot 支持的平台（如 QQ、微信、Telegram、Discord 等）。
-
-> **许可证：AGPL-3.0**  
-> 本插件在 AstrBot（AGPL）基础上开发，因此以 AGPL 开源。
+一个用于在 **QQ** 与 **Discord** 之间双向转发与同步消息的 AstrBot 插件，支持回复引用链还原、原生 @提及、图片转发等特性。
 
 ---
 
 ## ✨ 特性
 
-- **多平台互通**：支持 AstrBot 的任意平台适配器。
-- **消息来源标注**：支持自动在消息前增加来源信息（例如 UMO / 平台名 / 发送者）。
-- **可持久化存储**：自动保存转发规则，不会因重启丢失。
-- **可拓展性高**：所有逻辑模块化，便于二次开发。
+- **QQ ↔ Discord 双向转发**：消息在两端之间自动同步。
+- **消息来源标注**：自动在消息前标记发送者及来源平台（`[转发] 发送者名 (平台): 内容`）。
+- **回复引用链还原**：
+  - QQ 端回复已转发的消息时，自动引用原始 QQ 消息并 @ 原始发送者。
+  - Discord 端引用回复时，自动还原为 Discord 原生引用 + 跳转链接。
+- **Discord Webhook 集成**：自动为 Discord 频道创建 Webhook，以发送者身份显示头像和昵称。
+- **原生 Discord @提及**：QQ → Discord 转发时，QQ @提及自动转换为 Discord 原生 `<@user_id>` 格式。
+- **可持久化存储**：转发规则、消息映射缓存自动保存，重启不丢失。
 
 ---
 
 ## 🚀 快速开始
-1. **下载插件**：通过 AstrBot 的插件市场直接下载，或从本仓库的 Release 下载 `astrbot_plugin_msg_transfer` 的 `.zip` 文件，在 AstrBot WebUI 中的插件页面中选择 `从文件安装` 。
-2. **安装依赖**：AstrBot 会在 bot 重启时自动安装所需依赖。如确有手动安装依赖之需求，可执行以下命令
+
+1. **下载插件**：从本仓库的 Release 下载 `.zip` 文件，在 AstrBot WebUI 的插件页面中选择「从文件安装」。
+2. **安装依赖**：重启 AstrBot 会自动安装依赖，也可手动执行：
     ```bash
     pip install -r requirements.txt
     ```
-3. **重启 AstrBot**：我们推荐在安装本插件后手动重启一次 AstrBot。
+3. **（可选）Discord 原生 @提及**：如需 QQ→Discord 转发的 @提及功能，还需安装 `discord.py`：
+    ```bash
+    pip install discord.py>=2.0.0
+    ```
+4. **重启 AstrBot**。
 
 ---
 
 ## ⚙️ 配置
 
-目前插件暂无需额外配置，所有规则通过命令创建。
+插件无需额外配置，所有规则通过命令创建。绑定 Discord 目标时会自动创建 Webhook。
 
 ---
 
 ## 💬 指令列表
-| 指令        | 说明               |
-|-----------|------------------|
-| `mt add`  | 创建一则消息转发绑定的请求    |
-| `mt bind` | 接受一则消息转发绑定的请求    |
-| `mt del`  | 删除一条转发规则         |
-| `mt list` | 列出与当前会话相关的所有转发规则 |
-| `mt help` | 显示该插件帮助信息        |
+
+| 指令 | 说明 | 权限 |
+|------|------|------|
+| `mt add` | 在当前会话创建转发绑定请求 | ADMIN |
+| `mt bind <code>` | 在目标会话接受绑定请求 | 任意 |
+| `mt del <rid>` | 删除指定转发规则 | ADMIN |
+| `mt list` | 列出当前会话相关的所有转发规则 | 任意 |
+
+---
+
+## 📦 数据存储
+
+插件在 `data/plugin_data/msg_transfer/` 下维护以下文件：
+
+| 文件 | 用途 |
+|------|------|
+| `rules.json` | 转发规则（源 UMO → 目标 UMO） |
+| `pending.json` | 待绑定的请求 |
+| `webhooks.json` | Discord Webhook URL 映射 |
+| `mappings.json` | QQ 号 → QQ 昵称映射 |
+| `msg_mapping.json` | QQ 消息 ID ↔ Discord 消息 ID 映射（含发送者信息） |
+| `forward_log.json` | Discord 转发消息记录（用于多跳引用链还原） |
+
+---
+
+## 🔄 转发行为示例
+
+假设 QQ 群 `654321` 与 Discord 频道 `123456` 已绑定：
+
+### QQ → Discord
+
+```
+QQ: mmyddd: 1
+→ Discord (Webhook): mmyddd (QQ): 1
+```
+
+### Discord → QQ
+
+```
+Discord: mmyddd: 2
+→ QQ: [转发] mmyddd (discord): 2
+```
+
+### 多跳引用链（QQ 回复 → Discord 引用回复 → ...）
+
+```
+① QQ: mmyddd: 1
+② Discord (Webhook): mmyddd (QQ):  1
+③ Discord: mmyddd (引用②): 2
+④ QQ (引用①, @mmyddd): [转发] mmyddd (discord): 2
+⑤ QQ: mmyddd (引用④): 3
+⑥ Discord (引用③, @mmyddd): mmyddd (QQ): 3
+```
 
 ---
 
 ## 🧩 项目结构
-项目结构示例：
 
 ```
-astrbot/
-└─ data/
-   └─ plugins/
-      └─ astrbot_plugin_msg_transfer/
-         ├─ LICENSE
-         ├─ logo.png
-         ├─ main.py
-         ├─ metadata.yaml
-         ├─ README.md
-         └─ requirements.txt
+astrbot_plugin_msg_transfer/
+├── LICENSE
+├── README.md
+├── main.py          # 插件主逻辑
+├── webhook.py       # Discord Webhook 管理模块
+├── metadata.yaml
+└── requirements.txt
 ```
-
-同时，插件会建立 `astrbot/data/plugin_data/msg_transfer` 目录以存储持久化数据：
-
-```
-astrbot/
-└─ data/
-   └─ plugin_data/
-      └─ msg_transfer/
-         ├─ pending.json
-         └─ rules.json
-```
----
-
-## 📦 功能概念
-
-### **1. UMO（Unified Message Origin）**
-一个唯一标识会话的字符串，例如：
-```
-aiocqhttp:GroupMessage:654321
-wx:GroupMessage:123456
-your_name:FriendMessage:114514
-```
-
-UMO 能让插件知道“某条消息来自哪个平台的哪个会话”，确保转发到正确目标。
 
 ---
 
-### **2. 转发规则（Rules）**
+## 📜 许可证
 
-插件允许你创建规则：
-```
-A → B
-```
+- 本插件以 **AGPL-3.0** 开源。
+- 基于 [Siaospeed/astrbot_plugin_msg_transfer](https://github.com/Siaospeed/astrbot_plugin_msg_transfer) 进行 fork 改动。
+- 上游项目与 AstrBot 框架均基于 AGPL-3.0，因此本插件同样以 AGPL-3.0 分发。
 
-即来自端点 A 的消息会自动同步并转发给端点 B
-
-规则格式例如：
-
-```json
-{
-  "source_umo": "aiocqhttp:GroupMessage:654321",
-  "target_umo": "your_name:FriendMessage:114514"
-}
-```
-
-所有规则保存在 `astrbot/data/plugin_data/rules.json`
-
-### **3. 消息链（MessageChain）处理**
-
-插件会在转发前自动构造一条带来源信息的消息链，例如：
-
-```
-[转发] 张三 (1919810)
-a:GroupMessage:11451419 -> a:GroupMessage:14191981
-
-​这是一条示例消息
-```
-
-文字、图片、表情等组件都会被完整复制到目标平台。
-
-## 🔄 转发行为示例
-假设你有两条 UMO：
-
-- `aiocqhttp:GroupMessage:654321`
-- `your_name:FriendMessage:114514`
-
-创建规则后：
-- `aiocqhttp` 群 `654321` 的消息，会自动转发至 `your_name` 的好友 `114514`
-- 会自动加上消息链前的来源标注
+---
 
 ## 🤝 贡献
 
-欢迎提交：
-
-- Bug 报告
-- 新特性建议
-- PR（支持适配更多平台、更多规则类型）
-
-插件完全开源，希望它能够成为 AstrBot 最好用的“跨群桥接插件”。
+欢迎提交 Issue 或 PR。
