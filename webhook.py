@@ -9,8 +9,15 @@ from astrbot.core.star.star import star_map
 try:
     import discord
     HAS_DISCORD = True
+    # 检查是否为 py-cord 而非已停止维护的 discord.py
+    if not hasattr(discord, "__version__") or "py-cord" not in getattr(discord, "__version__", "").lower():
+        logger.warning(
+            "检测到 discord.py 而非 py-cord，可能存在 API 不兼容。"
+            "建议卸载后重新安装: pip uninstall discord.py && pip install py-cord>=2.4.0"
+        )
 except ImportError:
     HAS_DISCORD = False
+    logger.info("py-cord 未安装，Webhook 自动创建功能不可用。如需使用，请执行: pip install py-cord>=2.4.0")
 
 # Discord API 限制
 MAX_CONTENT_LENGTH = 2000
@@ -214,9 +221,10 @@ class DiscordWebhookManager:
                 else:
                     text_parts.append(f"[{name}]")
             elif hasattr(component, 'url') and component.url:
-                extra_lines.append(component.url)
+                url = str(component.url)[:500]
+                extra_lines.append(url)
             elif hasattr(component, 'src') and component.src:
-                extra_lines.append(component.src)
+                extra_lines.append(str(component.src)[:500])
         content = ''.join(text_parts)
         if extra_lines:
             if content and not content.endswith('\n'):
