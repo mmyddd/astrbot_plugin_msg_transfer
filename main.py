@@ -454,11 +454,18 @@ class MsgTransfer(star.Star):
                                 meta = self.store.get_msg_meta(orig_qq_id)
                                 if meta:
                                     chain_parts.append(Reply(id=orig_qq_id))
+                                    chain_parts.append(Plain(text=f"[转发] {sender_name} ({source_platform_name}):"))
                                     chain_parts.append(At(qq=meta['user_id']))
+                                    if msg_text:
+                                        chain_parts.append(Plain(text=f" {msg_text}"))
                                 else:
                                     chain_parts.append(Reply(id=orig_qq_id))
 
-                chain_parts.append(Plain(text=full_text))
+                if not chain_parts:
+                    chain_parts.append(Plain(text=full_text))
+                elif not any(isinstance(c, At) for c in chain_parts):
+                    # 有 Reply 但没查到时，补全发送者信息
+                    chain_parts.append(Plain(text=full_text))
                 chain = MessageChain()
                 chain.chain = chain_parts
                 sent = await self.context.send_message(target, chain)
