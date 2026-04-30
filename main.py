@@ -383,6 +383,14 @@ class MsgTransfer(star.Star):
                     _safe_keys = {k: str(v)[:200] for k, v in _dict.items() if not k.startswith('_')}
                     logger.info(f"[DiscordDebug] raw_message={_raw}")
                     logger.info(f"[DiscordDebug] message_obj keys: {_json.dumps(_safe_keys, ensure_ascii=False)}")
+                    # 检查 raw_message 的 reference 相关属性（Discord.py 回复消息）
+                    if _raw:
+                        _ref = getattr(_raw, 'reference', None)
+                        _ref_msg = getattr(_raw, 'referenced_message', None)
+                        _ref_id = getattr(_raw, '_referenced_message_id', None) or (_ref.id if _ref else None)
+                        logger.info(f"[DiscordDebug] reference={_ref}, ref_msg={_ref_msg}, ref_msg_id={_ref_id}")
+                        if _ref:
+                            logger.info(f"[DiscordDebug] reference.message_id={_ref.message_id}, reference.channel_id={_ref.channel_id}, reference.guild_id={_ref.guild_id}, reference.resolved={_ref.resolved}")
                 except Exception as _e:
                     logger.info(f"[DiscordDebug] error inspecting message_obj: {_e}")
                 discord_msg_id = event.message_obj.message_id
