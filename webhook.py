@@ -173,23 +173,30 @@ class DiscordWebhookManager:
 
     @staticmethod
     def format_message_content(message_chain) -> str:
-        """格式化消息内容为文本+图片分离，图片url单独一行"""
+        """格式化消息内容为Discord可读的文本"""
         text_parts = []
-        image_urls = []
+        extra_lines = []
         for component in message_chain:
             if hasattr(component, 'text') and component.text:
                 text_parts.append(component.text)
             elif hasattr(component, 'qq') and component.qq:
                 text_parts.append(f"<@{component.qq}>")
+            elif component.__class__.__name__ == "File":
+                name = component.name or "文件"
+                file_url = component.url or ""
+                if file_url:
+                    extra_lines.append(f"[{name}]({file_url})")
+                else:
+                    text_parts.append(f"[{name}]")
             elif hasattr(component, 'url') and component.url:
-                image_urls.append(component.url)
+                extra_lines.append(component.url)
             elif hasattr(component, 'src') and component.src:
-                image_urls.append(component.src)
+                extra_lines.append(component.src)
         content = ''.join(text_parts)
-        if image_urls:
+        if extra_lines:
             if content and not content.endswith('\n'):
                 content += '\n'
-            content += '\n'.join(image_urls)
+            content += '\n'.join(extra_lines)
         return content
 
     async def send_webhook_message(
