@@ -460,7 +460,7 @@ class MsgTransfer(star.Star):
             # 如果引用文本是 AstrBot 自动转发的格式（[转发]），解析原始发送者和消息
             if quote_text and quote_text.strip().startswith('[转发]'):
                 fwd_match = re.match(
-                    r"^[转发]\s+(.+?)(?:\s+\(\d+\))?\s*[：:]\s*(.*)",
+                    r"^\[转发\]\s+(.+?)(?:\s+\(\d+\))?\s*[：:]\s*(.*)",
                     quote_text.strip()
                 )
                 if fwd_match:
