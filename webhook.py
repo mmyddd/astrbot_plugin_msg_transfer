@@ -212,14 +212,14 @@ class DiscordWebhookManager:
         webhook_url: str,
         username: str,
         avatar_url: str,
-        content: str
-    ) -> bool:
-        """发送消息到Discord Webhook，复用 aiohttp session"""
+        content: str,
+        reply_to_message_id: str | None = None,
+    ) -> str | None:
+        """发送消息到Discord Webhook，返回Discord消息ID（失败返回None）"""
         try:
             if not content:
                 content = "​"
 
-            # 校验并清理
             username = self._sanitize_username(username)
             content = self._truncate_content(content)
 
@@ -227,22 +227,32 @@ class DiscordWebhookManager:
                 "content": content,
                 "username": username,
                 "avatar_url": avatar_url,
-                # 禁止自动解析任何提及，防止 @everyone/@here 被意外触发
                 "allowed_mentions": {"parse": []},
             }
 
+            if reply_to_message_id:
+                payload["message_reference"] = {
+                    "message_id": reply_to_message_id,
+                    "fail_if_not_exists": False,
+                }
+
             session = await self._get_session()
-            async with session.post(webhook_url, json=payload) as resp:
+            # 使用 wait=true 获取消息 ID
+            url = webhook_url + "?wait=true"
+            async with session.post(url, json=payload) as resp:
                 if resp.status not in (200, 201, 204):
                     body = await resp.text()
                     logger.error(
                         f"Webhook发送失败 [HTTP {resp.status}]: {body[:500]}"
                     )
-                    return False
-                return True
+                    return None
+                if resp.status == 204:
+                    return None
+                data = await resp.json()
+                return data.get("id")
         except Exception as e:
             logger.error(f"Webhook发送异常: {e}")
-            return False
+            return None
 
     @staticmethod
     def build_virtual_username(sender_name: str, source_platform: str) -> str:

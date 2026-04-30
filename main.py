@@ -96,23 +96,19 @@ def format_origin_header(event: AstrMessageEvent, umo: str):
 # 存储层（无锁简化）
 # ------------------------
 class MsgTransferStore:
-    def __init__(self, rule_file: Path, pending_file: Path, webhook_file: Path, mapping_file: Path):
+    def __init__(self, rule_file: Path, pending_file: Path, webhook_file: Path, mapping_file: Path, msg_mapping_file: Path):
         self.rule_file = rule_file
         self.pending_file = pending_file
         self.webhook_file = webhook_file
         self.mapping_file = mapping_file
+        self.msg_mapping_file = msg_mapping_file
         self._ensure_files()
 
     def _ensure_files(self):
         self.rule_file.parent.mkdir(parents=True, exist_ok=True)
-        if not self.rule_file.exists():
-            self.rule_file.write_text("{}", encoding="utf-8")
-        if not self.pending_file.exists():
-            self.pending_file.write_text("{}", encoding="utf-8")
-        if not self.webhook_file.exists():
-            self.webhook_file.write_text("{}", encoding="utf-8")
-        if not self.mapping_file.exists():
-            self.mapping_file.write_text("{}", encoding="utf-8")
+        for f in (self.rule_file, self.pending_file, self.webhook_file, self.mapping_file, self.msg_mapping_file):
+            if not f.exists():
+                f.write_text("{}", encoding="utf-8")
 
     # ----- rules -----
     def load_rules(self):
@@ -234,6 +230,29 @@ class MsgTransferStore:
     def save_mappings(self, data: dict):
         save_json(self.mapping_file, data)
 
+    # ----- msg_id mapping (QQ msg_id -> Discord msg_id) -----
+    MAX_MSG_MAPPINGS = 2000
+
+    def load_msg_mapping(self):
+        return load_json(self.msg_mapping_file)
+
+    def save_msg_mapping(self, data: dict):
+        save_json(self.msg_mapping_file, data)
+
+    def set_msg_mapping(self, qq_msg_id: str, discord_msg_id: str):
+        data = self.load_msg_mapping()
+        data[qq_msg_id] = discord_msg_id
+        # 限制条目数，防止无限增长
+        if len(data) > self.MAX_MSG_MAPPINGS:
+            keys = list(data.keys())[:len(data) // 2]
+            for k in keys:
+                del data[k]
+        self.save_msg_mapping(data)
+
+    def get_msg_mapping(self, qq_msg_id: str) -> str | None:
+        data = self.load_msg_mapping()
+        return data.get(qq_msg_id)
+
 
 # ------------------------
 # 插件主体
@@ -247,8 +266,9 @@ class MsgTransfer(star.Star):
         self.pending_file = self.data_dir / "pending.json"
         self.webhook_file = self.data_dir / "webhooks.json"
         self.mapping_file = self.data_dir / "mappings.json"
+        self.msg_mapping_file = self.data_dir / "msg_mapping.json"
 
-        self.store = MsgTransferStore(self.rule_file, self.pending_file, self.webhook_file, self.mapping_file)
+        self.store = MsgTransferStore(self.rule_file, self.pending_file, self.webhook_file, self.mapping_file, self.msg_mapping_file)
         self.webhook_manager = DiscordWebhookManager(context)
 
     async def initialize(self):
@@ -388,30 +408,34 @@ class MsgTransfer(star.Star):
             # 检查是否有引用消息（Quote/Reply）
             quote_text = None
             quote_sender = None
-            # 适配 OneBot v11 的引用消息段类型为 'Quote' 或 'Reply'
+            reply_to_qq_id = None  # 被回复的原始QQ消息ID
             for seg in message_chain:
                 if seg.__class__.__name__ in ("Quote", "Reply"):
-                    # 尝试获取被引用消息内容和发送者
                     if hasattr(seg, "origin_text"):
                         quote_text = seg.origin_text
                     if hasattr(seg, "origin_sender"):
                         quote_sender = seg.origin_sender
-                    # 兼容部分平台字段
                     if hasattr(seg, "text") and not quote_text:
                         quote_text = seg.text
                     if hasattr(seg, "sender_name") and not quote_sender:
                         quote_sender = seg.sender_name
-                    # 仍未取到时，尝试 message_str
                     if not quote_text and hasattr(seg, "message_str") and seg.message_str:
                         quote_text = seg.message_str
-                    # 引用文件消息时 text/chain 为空，从 chain 中提取文件名
                     if not quote_text and hasattr(seg, "chain") and seg.chain:
                         for sub in seg.chain:
                             if sub.__class__.__name__ == "File":
                                 fname = getattr(sub, "name", None) or getattr(sub, "filename", None) or "文件"
                                 quote_text = f"[{fname}]"
                                 break
+                    # 取被回复消息的 QQ 消息 ID，用于查找对应的 Discord 消息
+                    if hasattr(seg, "id") and seg.id:
+                        reply_to_qq_id = str(seg.id)
                     break
+
+            # 查找之前转发该 QQ 消息时产生的 Discord 消息 ID
+            reply_to_discord_id = None
+            if reply_to_qq_id:
+                reply_to_discord_id = self.store.get_msg_mapping(reply_to_qq_id)
 
             # 替换消息链中的At(QQ)为对应名称
             new_chain = []
@@ -421,34 +445,40 @@ class MsgTransfer(star.Star):
                     qq_name = mapping.get(qq_id, qq_id)
                     new_chain.append(Plain(f"@{qq_name} "))
                 elif seg.__class__.__name__ in ("Quote", "Reply"):
-                    continue  # 不直接转发引用段
+                    continue
                 else:
                     new_chain.append(seg)
 
-            # 构建引用文本（如有）
+            # 构建引用文本（无对应 Discord 消息时回退到 markdown 引用）
             quote_block = None
-            if quote_text:
-                # 检查quote_text是否为图片链接，如果是则单独一行，否则正常引用
+            if quote_text and not reply_to_discord_id:
                 if (quote_text.startswith('http://') or quote_text.startswith('https://')) and (quote_text.endswith('.jpg') or quote_text.endswith('.png') or quote_text.endswith('.jpeg') or quote_text.endswith('.gif') or quote_text.endswith('.webp')):
                     quote_block = f"> [图片]({quote_text})\n"
                 else:
                     quote_block = f"> {quote_text}\n"
 
-            # 构建虚拟用户信息
             virtual_username = DiscordWebhookManager.build_virtual_username(sender_name, source_platform)
             avatar_url = DiscordWebhookManager.get_avatar_url(source_platform, sender_id)
-            # 文件处理已在main完成，直接用format_message_content
             content = DiscordWebhookManager.format_message_content(new_chain)
             if quote_block:
                 content = quote_block + content
 
-            success = await self.webhook_manager.send_webhook_message(
+            discord_msg_id = await self.webhook_manager.send_webhook_message(
                 webhook_url=webhook_url,
                 username=virtual_username,
                 avatar_url=avatar_url,
-                content=content
+                content=content,
+                reply_to_message_id=reply_to_discord_id,
             )
-            return success
+
+            # 存储当前 QQ 消息 ID -> Discord 消息 ID 映射
+            if discord_msg_id:
+                qq_msg_id = event.message_obj.message_id
+                if qq_msg_id:
+                    self.store.set_msg_mapping(qq_msg_id, discord_msg_id)
+                return True
+
+            return False
         except Exception as e:
             logger.error(f"❌ Webhook转发异常 #{rule_id}: {e}")
             return False
