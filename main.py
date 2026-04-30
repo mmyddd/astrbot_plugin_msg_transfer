@@ -1,6 +1,8 @@
 import json
 import re
 import secrets
+import time
+import urllib.parse
 from pathlib import Path
 
 import astrbot.api.star as star
@@ -286,7 +288,7 @@ class MsgTransferStore:
 
     def add_forward_log(self, discord_msg_id: str, content: str, sender_id: str = ""):
         data = self.load_forward_log()
-        ts = __import__("time").time()
+        ts = time.time()
         data[discord_msg_id] = {"content": content, "sender_id": sender_id, "timestamp": ts}
         if len(data) > self.MAX_FORWARD_LOG:
             for k in sorted(data, key=lambda k: data[k]["timestamp"])[:len(data) // 2]:
@@ -586,12 +588,12 @@ class MsgTransfer(star.Star):
                     # 如果 At 的是机器人自身且有解析出的 Discord 发送者，用 Discord 原生 @mention 或名称
                     if self_id and qq_id == self_id:
                         if discord_sender_id:
-                            new_chain.append(Plain(f"<@{discord_sender_id}> "))
+                            new_chain.append(Plain(text=f"<@{discord_sender_id}> "))
                         elif discord_sender_name:
-                            new_chain.append(Plain(f"@{discord_sender_name} "))
+                            new_chain.append(Plain(text=f"@{discord_sender_name} "))
                     else:
                         qq_name = mapping.get(qq_id, qq_id)
-                        new_chain.append(Plain(f"@{qq_name} "))
+                        new_chain.append(Plain(text=f"@{qq_name} "))
                 elif seg.__class__.__name__ in ("Quote", "Reply"):
                     continue
                 else:
@@ -633,7 +635,11 @@ class MsgTransfer(star.Star):
             # 无原生回复时带 markdown 引用
             elif quote_text:
                 prefix = f"**{quote_sender}**: " if quote_sender else ""
-                if (quote_text.startswith('http://') or quote_text.startswith('https://')) and (quote_text.endswith('.jpg') or quote_text.endswith('.png') or quote_text.endswith('.jpeg') or quote_text.endswith('.gif') or quote_text.endswith('.webp')):
+                _is_img = False
+                if quote_text.startswith(('http://', 'https://')):
+                    _path = urllib.parse.urlparse(quote_text).path.lower()
+                    _is_img = _path.endswith(('.jpg', '.png', '.jpeg', '.gif', '.webp'))
+                if _is_img:
                     quote_block = f"> {prefix}[图片]({quote_text})\n"
                 else:
                     quote_block = f"> {prefix}{quote_text}\n"

@@ -10,7 +10,6 @@ try:
     HAS_DISCORD = True
 except ImportError:
     HAS_DISCORD = False
-    logger.warning("未安装discord库，自动创建Webhook功能不可用")
 
 # Discord API 限制
 MAX_CONTENT_LENGTH = 2000
@@ -217,7 +216,7 @@ class DiscordWebhookManager:
         """发送消息到Discord Webhook，返回Discord消息ID（失败返回None）"""
         try:
             if not content:
-                content = "​"
+                content = "​"  # zero-width space, prevents Discord "message cannot be empty" rejection
 
             username = self._sanitize_username(username)
             content = self._truncate_content(content)
