@@ -298,6 +298,11 @@ class MsgTransferStore:
                 self._forward_text_idx[content] = (discord_msg_id, ts)
         save_json(self.forward_log_file, data)
 
+    def get_forward_entry_sender(self, discord_msg_id: str) -> str | None:
+        """根据 Discord 消息 ID 直接从 forward_log 中获取发送者 ID"""
+        entry = self.load_forward_log().get(discord_msg_id)
+        return entry.get("sender_id") if entry else None
+
     def find_forward_log_by_content(self, content: str) -> str | None:
         if not content:
             return None
@@ -570,7 +575,7 @@ class MsgTransfer(star.Star):
                 fwd_discord_id = self.store.find_forward_log_by_content(quote_text)
                 if fwd_discord_id:
                     reply_to_discord_id = fwd_discord_id
-                    discord_sender_id = self.store.find_forward_log_sender(quote_text)
+                    discord_sender_id = self.store.get_forward_entry_sender(fwd_discord_id)
 
             # 替换消息链中的At(QQ)为对应名称
             new_chain = []
