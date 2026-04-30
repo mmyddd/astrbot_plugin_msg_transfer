@@ -52,8 +52,8 @@ class DiscordWebhookManager:
             if hasattr(client, 'user') and client.user and hasattr(client, 'get_channel'):
                 self._discord_client = client
                 return True
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"提取Discord客户端时出错: {e}")
         return False
 
     def _search_platform_insts(self, platform_manager) -> bool:
@@ -92,6 +92,10 @@ class DiscordWebhookManager:
 
         return None
 
+    def get_discord_client(self):
+        """公开获取Discord客户端实例"""
+        return self._get_discord_client()
+
     async def create_webhook_for_channel(self, channel_id: int, webhook_name: str = "MsgTransfer Bot") -> str | None:
         """为指定频道自动创建Webhook"""
         if not HAS_DISCORD:
@@ -120,14 +124,13 @@ class DiscordWebhookManager:
             logger.info(f"成功为频道 {channel_id} 创建Webhook")
             return webhook.url
 
-        except discord.Forbidden:
-            logger.error(f"机器人在频道 {channel_id} 没有创建Webhook的权限")
-            return None
-        except discord.HTTPException as e:
-            logger.error(f"创建Webhook时发生HTTP错误: {e}")
-            return None
         except Exception as e:
-            logger.error(f"创建Webhook时发生未知错误: {e}")
+            if HAS_DISCORD and isinstance(e, discord.Forbidden):
+                logger.error(f"机器人在频道 {channel_id} 没有创建Webhook的权限")
+            elif HAS_DISCORD and isinstance(e, discord.HTTPException):
+                logger.error(f"创建Webhook时发生HTTP错误: {e}")
+            else:
+                logger.error(f"创建Webhook时发生未知错误: {e}")
             return None
 
     @staticmethod
@@ -229,8 +232,7 @@ class DiscordWebhookManager:
             }
 
             session = await self._get_session()
-            url = webhook_url + "?wait=true"
-            async with session.post(url, json=payload) as resp:
+            async with session.post(webhook_url, json=payload, params={"wait": "true"}) as resp:
                 if resp.status not in (200, 201, 204):
                     body = await resp.text()
                     logger.error(

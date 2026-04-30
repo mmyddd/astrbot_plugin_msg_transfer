@@ -13,6 +13,7 @@ from astrbot.api import logger
 import string
 
 from astrbot.core.message.components import Plain, Reply, At
+from astrbot.core.message.message_event_result import MessageChain
 from .webhook import DiscordWebhookManager
 
 
@@ -347,7 +348,7 @@ class MsgTransfer(star.Star):
         logger.info("MsgTransfer plugin init OK")
 
     @filter.command_group("mt")
-    def mt(self):
+    def mt(self, event: AstrMessageEvent):
         """mt 命令组"""
         pass
 
@@ -466,7 +467,6 @@ class MsgTransfer(star.Star):
 
             # 非 webhook 目标（如 QQ），通过 AstrBot 框架发送
             try:
-                from astrbot.core.message.message_event_result import MessageChain
                 sender_name = event.get_sender_name()
                 source_platform_name = event.get_platform_name()
                 msg_text = DiscordWebhookManager.format_message_content(message_chain)
@@ -616,7 +616,7 @@ class MsgTransfer(star.Star):
                 jump_url = None
                 if channel_id:
                     try:
-                        client = self.webhook_manager._get_discord_client()
+                        client = self.webhook_manager.get_discord_client()
                         if client:
                             channel = await client.fetch_channel(channel_id)
                             if hasattr(channel, 'guild') and channel.guild:
