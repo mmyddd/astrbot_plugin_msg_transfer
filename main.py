@@ -401,13 +401,16 @@ class MsgTransfer(star.Star):
             try:
                 from astrbot.core.message.message_event_result import MessageChain
                 from astrbot.core.message.components import Plain as APlain
-                sender_name = event.get_sender_name()
-                sender_id = event.get_sender_id()
-                source_platform_name = event.get_platform_name()
-                # 在消息前加上发送者标识
-                header = APlain(f"[转发] {sender_name} ({source_platform_name}):\n")
-                chain = MessageChain()
-                chain.chain = [header] + list(message_chain)
+                sender_name = event.get_sender_name()
+                source_platform_name = event.get_platform_name()
+                # 将整个消息合并为一行，确保 QQ 回复引用能抓到完整内容
+                msg_text = DiscordWebhookManager.format_message_content(message_chain)
+                if msg_text:
+                    full_text = f"[转发] {sender_name} ({source_platform_name}): {msg_text}"
+                else:
+                    full_text = f"[转发] {sender_name} ({source_platform_name})"
+                chain = MessageChain()
+                chain.chain = [APlain(full_text)]
                 sent = await self.context.send_message(target, chain)
                 if sent:
                     logger.info(f"已转发 #{rid} -> {target}")
