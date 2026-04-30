@@ -376,6 +376,15 @@ class MsgTransfer(star.Star):
             # 记录从 Discord 转发的消息，供 QQ 回复引用时还原跳转链接
             platform = event.get_platform_name()
             if platform == "discord":
+                import json as _json
+                try:
+                    _raw = getattr(event.message_obj, 'raw_message', None)
+                    _dict = getattr(event.message_obj, '__dict__', {})
+                    _safe_keys = {k: str(v)[:200] for k, v in _dict.items() if not k.startswith('_')}
+                    logger.info(f"[DiscordDebug] raw_message={_raw}")
+                    logger.info(f"[DiscordDebug] message_obj keys: {_json.dumps(_safe_keys, ensure_ascii=False)}")
+                except Exception as _e:
+                    logger.info(f"[DiscordDebug] error inspecting message_obj: {_e}")
                 discord_msg_id = event.message_obj.message_id
                 if discord_msg_id:
                     msg_text = DiscordWebhookManager.format_message_content(message_chain)
