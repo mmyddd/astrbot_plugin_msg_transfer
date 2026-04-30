@@ -543,140 +543,167 @@ class MsgTransfer(star.Star):
         except Exception as e:
             logger.error(f"❌ 处理规则 #{rid} 时发生异常: {e}")
 
+    # ---- Webhook 辅助方法 ----
+
+    @staticmethod
+    def _extract_quote_info(message_chain):
+        """从消息链中提取引用/回复信息"""
+        quote_text = None
+        quote_sender = None
+        reply_to_qq_id = None
+        for seg in message_chain:
+            if seg.__class__.__name__ in ("Quote", "Reply"):
+                if hasattr(seg, "origin_text"):
+                    quote_text = seg.origin_text
+                if hasattr(seg, "origin_sender"):
+                    quote_sender = seg.origin_sender
+                if hasattr(seg, "text") and not quote_text:
+                    quote_text = seg.text
+                if hasattr(seg, "sender_name") and not quote_sender:
+                    quote_sender = seg.sender_name
+                if hasattr(seg, "sender_nickname") and not quote_sender:
+                    quote_sender = seg.sender_nickname
+                if not quote_text and hasattr(seg, "message_str") and seg.message_str:
+                    quote_text = seg.message_str
+                if not quote_text and hasattr(seg, "chain") and seg.chain:
+                    for sub in seg.chain:
+                        if sub.__class__.__name__ == "File":
+                            fname = getattr(sub, "name", None) or getattr(sub, "filename", None) or "文件"
+                            quote_text = f"[{fname}]"
+                            break
+                if hasattr(seg, "id") and seg.id:
+                    reply_to_qq_id = str(seg.id)
+                break
+        return quote_text, quote_sender, reply_to_qq_id
+
+    @staticmethod
+    def _resolve_forward_quote(quote_text, quote_sender):
+        """解析 [转发] 前缀，返回 (quote_text, quote_sender, discord_sender_name)"""
+        discord_sender_name = None
+        if quote_text and quote_text.strip().startswith('[转发]'):
+            fwd_match = re.match(
+                r"^\[转发\]\s+(.+?)(?:\s+\(\d+\))?\s*[：:]\s*(.*)",
+                quote_text.strip()
+            )
+            if fwd_match:
+                parsed_sender = fwd_match.group(1).strip()
+                parsed_text = fwd_match.group(2).strip()
+                if parsed_sender:
+                    quote_sender = parsed_sender
+                if parsed_text:
+                    parsed_text = re.sub(r'@[^\s(]+\(\d+\)\s*', '', parsed_text).strip()
+                    if parsed_text:
+                        quote_text = parsed_text
+                if parsed_sender:
+                    discord_sender_name = parsed_sender
+        return quote_text, quote_sender, discord_sender_name
+
+    async def _resolve_reply_target(self, reply_to_qq_id, quote_text, target_umo):
+        """解析回复目标，返回 (reply_to_discord_id, discord_sender_id, jump_url)"""
+        reply_to_discord_id = None
+        if reply_to_qq_id:
+            reply_to_discord_id = self.store.get_msg_mapping(reply_to_qq_id)
+
+        discord_sender_id = None
+        if reply_to_discord_id is None and quote_text:
+            fwd_discord_id = self.store.find_forward_log_by_content(quote_text)
+            if fwd_discord_id:
+                reply_to_discord_id = fwd_discord_id
+                discord_sender_id = self.store.get_forward_entry_sender(fwd_discord_id)
+
+        jump_url = None
+        if reply_to_discord_id:
+            channel_id = None
+            parts = target_umo.split(":")
+            if len(parts) >= 3:
+                try:
+                    channel_id = int(parts[2])
+                except (ValueError, TypeError):
+                    channel_id = None
+            if channel_id:
+                try:
+                    client = self.webhook_manager.get_discord_client()
+                    if client:
+                        channel = await client.fetch_channel(channel_id)
+                        if hasattr(channel, 'guild') and channel.guild:
+                            guild_id = channel.guild.id
+                            jump_url = f"https://discord.com/channels/{guild_id}/{channel_id}/{reply_to_discord_id}"
+                except Exception:
+                    pass
+
+        return reply_to_discord_id, discord_sender_id, jump_url
+
+    @staticmethod
+    def _replace_ats(message_chain, discord_sender_id, discord_sender_name, mapping, self_id):
+        """将 At(QQ) 替换为 Discord 兼容的提及格式"""
+        new_chain = []
+        for seg in message_chain:
+            if seg.__class__.__name__ == "At" and hasattr(seg, "qq"):
+                qq_id = str(seg.qq)
+                if self_id and qq_id == self_id:
+                    if discord_sender_id:
+                        new_chain.append(Plain(text=f"<@{discord_sender_id}> "))
+                    elif discord_sender_name:
+                        new_chain.append(Plain(text=f"@{discord_sender_name} "))
+                else:
+                    qq_name = mapping.get(qq_id, qq_id)
+                    new_chain.append(Plain(text=f"@{qq_name} "))
+            elif seg.__class__.__name__ in ("Quote", "Reply"):
+                continue
+            else:
+                new_chain.append(seg)
+        return new_chain
+
+    @staticmethod
+    def _build_webhook_quote(content, reply_to_discord_id, jump_url, quote_text, quote_sender):
+        """为 webhook 消息添加引用块"""
+        if reply_to_discord_id:
+            prefix = f"**{quote_sender}**: " if quote_sender else ""
+            if jump_url:
+                label = quote_text or "引用消息"
+                return f"> {prefix}[{label}]({jump_url})\n{content}"
+            elif quote_text:
+                return f"> {prefix}{quote_text}\n{content}"
+            return content
+
+        if quote_text:
+            prefix = f"**{quote_sender}**: " if quote_sender else ""
+            _is_img = False
+            if quote_text.startswith(('http://', 'https://')):
+                _path = urllib.parse.urlparse(quote_text).path.lower()
+                _is_img = _path.endswith(('.jpg', '.png', '.jpeg', '.gif', '.webp'))
+            quote_block = f"> {prefix}[图片]({quote_text})\n" if _is_img else f"> {prefix}{quote_text}\n"
+            return quote_block + content
+
+        return content
+
     async def _forward_with_webhook(self, event: AstrMessageEvent, target_umo: str, message_chain, rule_id: str, webhook_url: str) -> bool:
         try:
             sender_name = event.get_sender_name()
             sender_id = event.get_sender_id()
             source_platform = event.get_platform_name()
-
+            self_id = event.get_self_id()
             mapping = self.store.load_mappings()
 
-            # 检查是否有引用消息（Quote/Reply）
-            quote_text = None
-            quote_sender = None
-            reply_to_qq_id = None  # 被回复的原始QQ消息ID
-            for seg in message_chain:
-                if seg.__class__.__name__ in ("Quote", "Reply"):
-                    if hasattr(seg, "origin_text"):
-                        quote_text = seg.origin_text
-                    if hasattr(seg, "origin_sender"):
-                        quote_sender = seg.origin_sender
-                    if hasattr(seg, "text") and not quote_text:
-                        quote_text = seg.text
-                    if hasattr(seg, "sender_name") and not quote_sender:
-                        quote_sender = seg.sender_name
-                    if hasattr(seg, "sender_nickname") and not quote_sender:
-                        quote_sender = seg.sender_nickname
-                    if not quote_text and hasattr(seg, "message_str") and seg.message_str:
-                        quote_text = seg.message_str
-                    if not quote_text and hasattr(seg, "chain") and seg.chain:
-                        for sub in seg.chain:
-                            if sub.__class__.__name__ == "File":
-                                fname = getattr(sub, "name", None) or getattr(sub, "filename", None) or "文件"
-                                quote_text = f"[{fname}]"
-                                break
-                    if hasattr(seg, "id") and seg.id:
-                        reply_to_qq_id = str(seg.id)
-                    break
+            # Step 1-2: 提取并解析引用信息
+            quote_text, quote_sender, reply_to_qq_id = self._extract_quote_info(message_chain)
+            quote_text, quote_sender, discord_sender_name = self._resolve_forward_quote(quote_text, quote_sender)
 
-            discord_sender_name = None
-            discord_sender_id = None
-            # 如果引用文本是 AstrBot 自动转发的格式（[转发]），解析原始发送者和消息
-            if quote_text and quote_text.strip().startswith('[转发]'):
-                fwd_match = re.match(
-                    r"^\[转发\]\s+(.+?)(?:\s+\(\d+\))?\s*[：:]\s*(.*)",
-                    quote_text.strip()
-                )
-                if fwd_match:
-                    parsed_sender = fwd_match.group(1).strip()
-                    parsed_text = fwd_match.group(2).strip()
-                    if parsed_sender:
-                        quote_sender = parsed_sender
-                    if parsed_text:
-                        # 去除 @用户名(用户ID) 干扰，恢复纯净内容用于匹配和引用
-                        parsed_text = re.sub(r'@[^\s(]+\(\d+\)\s*', '', parsed_text).strip()
-                        if parsed_text:
-                            quote_text = parsed_text
-                    if parsed_sender:
-                        discord_sender_name = parsed_sender
-            # 查找之前转发该 QQ 消息时产生的 Discord 消息 ID
-            reply_to_discord_id = None
-            if reply_to_qq_id:
-                reply_to_discord_id = self.store.get_msg_mapping(reply_to_qq_id)
+            # Step 3: 解析 Discord 端回复目标
+            reply_to_discord_id, discord_sender_id, jump_url = await self._resolve_reply_target(
+                reply_to_qq_id, quote_text, target_umo
+            )
 
-            # 如果 msg_mapping 中找不到（D→Q 方向），尝试从 forward_log 匹配
-            if reply_to_discord_id is None and quote_text:
-                fwd_discord_id = self.store.find_forward_log_by_content(quote_text)
-                if fwd_discord_id:
-                    reply_to_discord_id = fwd_discord_id
-                    discord_sender_id = self.store.get_forward_entry_sender(fwd_discord_id)
+            # Step 4: 替换 @提及
+            new_chain = self._replace_ats(message_chain, discord_sender_id, discord_sender_name, mapping, self_id)
 
-            # 替换消息链中的At(QQ)为对应名称
-            new_chain = []
-            for seg in message_chain:
-                if seg.__class__.__name__ == "At" and hasattr(seg, "qq"):
-                    qq_id = str(seg.qq)
-                    self_id = event.get_self_id()
-                    # 如果 At 的是机器人自身且有解析出的 Discord 发送者，用 Discord 原生 @mention 或名称
-                    if self_id and qq_id == self_id:
-                        if discord_sender_id:
-                            new_chain.append(Plain(text=f"<@{discord_sender_id}> "))
-                        elif discord_sender_name:
-                            new_chain.append(Plain(text=f"@{discord_sender_name} "))
-                    else:
-                        qq_name = mapping.get(qq_id, qq_id)
-                        new_chain.append(Plain(text=f"@{qq_name} "))
-                elif seg.__class__.__name__ in ("Quote", "Reply"):
-                    continue
-                else:
-                    new_chain.append(seg)
-
+            # Step 5-6: 构建 webhook 内容（含引用块）
             virtual_username = DiscordWebhookManager.build_virtual_username(sender_name, source_platform)
             avatar_url = DiscordWebhookManager.get_avatar_url(source_platform, sender_id)
-            content = DiscordWebhookManager.format_message_content(new_chain)
+            raw_content = DiscordWebhookManager.format_message_content(new_chain)
+            content = self._build_webhook_quote(raw_content, reply_to_discord_id, jump_url, quote_text, quote_sender)
 
-            # 有对应的 Discord 消息 → 在 webhook 内容中插入跳转链接
-            if reply_to_discord_id:
-                channel_id = None
-                parts = target_umo.split(":")
-                if len(parts) >= 3:
-                    try:
-                        channel_id = int(parts[2])
-                    except (ValueError, TypeError):
-                        channel_id = None
-
-                jump_url = None
-                if channel_id:
-                    try:
-                        client = self.webhook_manager.get_discord_client()
-                        if client:
-                            channel = await client.fetch_channel(channel_id)
-                            if hasattr(channel, 'guild') and channel.guild:
-                                guild_id = channel.guild.id
-                                jump_url = f"https://discord.com/channels/{guild_id}/{channel_id}/{reply_to_discord_id}"
-                    except Exception:
-                        pass
-
-                prefix = f"**{quote_sender}**: " if quote_sender else ""
-                if jump_url:
-                    label = quote_text or "引用消息"
-                    content = f"> {prefix}[{label}]({jump_url})\n{content}"
-                elif quote_text:
-                    content = f"> {prefix}{quote_text}\n{content}"
-
-            # 无原生回复时带 markdown 引用
-            elif quote_text:
-                prefix = f"**{quote_sender}**: " if quote_sender else ""
-                _is_img = False
-                if quote_text.startswith(('http://', 'https://')):
-                    _path = urllib.parse.urlparse(quote_text).path.lower()
-                    _is_img = _path.endswith(('.jpg', '.png', '.jpeg', '.gif', '.webp'))
-                if _is_img:
-                    quote_block = f"> {prefix}[图片]({quote_text})\n"
-                else:
-                    quote_block = f"> {prefix}{quote_text}\n"
-                content = quote_block + content
-
+            # Step 7: 发送并记录映射
             discord_msg_id = await self.webhook_manager.send_webhook_message(
                 webhook_url=webhook_url,
                 username=virtual_username,
