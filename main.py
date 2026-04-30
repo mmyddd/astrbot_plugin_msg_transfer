@@ -10,7 +10,7 @@ from astrbot.api import logger
 
 import string
 
-from astrbot.core.message.components import Plain
+from astrbot.core.message.components import Plain, Reply, At
 from .webhook import DiscordWebhookManager
 
 
@@ -208,10 +208,12 @@ class MsgTransferStore:
     def save_msg_mapping(self, data: dict):
         save_json(self.msg_mapping_file, data)
 
-    def set_msg_mapping(self, qq_msg_id: str, discord_msg_id: str):
+    def set_msg_mapping(self, qq_msg_id: str, discord_msg_id: str, qq_user_id: str = "", qq_user_name: str = ""):
         data = self.load_msg_mapping()
-        data[qq_msg_id] = discord_msg_id
-        # 限制条目数，防止无限增长
+        if qq_user_id:
+            data[qq_msg_id] = f"{discord_msg_id}|{qq_user_id}|{qq_user_name}"
+        else:
+            data[qq_msg_id] = discord_msg_id
         if len(data) > self.MAX_MSG_MAPPINGS:
             keys = list(data.keys())[:len(data) // 2]
             for k in keys:
@@ -220,7 +222,28 @@ class MsgTransferStore:
 
     def get_msg_mapping(self, qq_msg_id: str) -> str | None:
         data = self.load_msg_mapping()
-        return data.get(qq_msg_id)
+        val = data.get(qq_msg_id)
+        if val and isinstance(val, str) and '|' in val:
+            return val.split('|')[0]
+        return val
+
+    def get_msg_meta(self, qq_msg_id: str) -> dict | None:
+        """获取QQ消息的发送者信息"""
+        data = self.load_msg_mapping()
+        val = data.get(qq_msg_id)
+        if val and isinstance(val, str) and '|' in val:
+            parts = val.split('|')
+            return {"user_id": parts[1], "user_name": parts[2] if len(parts) > 2 else parts[1]}
+        return None
+
+    def find_qq_msg_id_by_discord_id(self, discord_msg_id: str) -> str | None:
+        """反向查找：通过 Discord 消息 ID 找到对应的 QQ 消息 ID"""
+        data = self.load_msg_mapping()
+        for qq_id, val in data.items():
+            d_id = val.split('|')[0] if isinstance(val, str) and '|' in val else val
+            if str(d_id) == str(discord_msg_id):
+                return qq_id
+        return None
 
     # ----- forward_log (Discord→QQ 消息记录，用于回复引用链) -----
     MAX_FORWARD_LOG = 200
@@ -376,29 +399,6 @@ class MsgTransfer(star.Star):
             # 记录从 Discord 转发的消息，供 QQ 回复引用时还原跳转链接
             platform = event.get_platform_name()
             if platform == "discord":
-                import json as _json
-                try:
-                    _raw = getattr(event.message_obj, 'raw_message', None)
-                    _dict = getattr(event.message_obj, '__dict__', {})
-                    _safe_keys = {k: str(v)[:200] for k, v in _dict.items() if not k.startswith('_')}
-                    logger.info(f"[DiscordDebug] message_obj keys: {_json.dumps(_safe_keys, ensure_ascii=False)}")
-                    # 检查 raw_message 的 reference 相关属性（Discord.py 回复消息）
-                    if _raw:
-                        _ref = getattr(_raw, 'reference', None)
-                        _ref_msg = getattr(_raw, 'referenced_message', None)
-                        logger.info(f"[DiscordDebug] reference={_ref}, ref_type={type(_ref).__name__}")
-                        logger.info(f"[DiscordDebug] referenced_message={_ref_msg}")
-                        if _ref:
-                            _ref_mid = _ref.message_id
-                            _ref_cid = _ref.channel_id
-                            _ref_gid = _ref.guild_id
-                            _ref_resolved = _ref.resolved
-                            logger.info(f"[DiscordDebug] ref.message_id={_ref_mid}, ref.channel_id={_ref_cid}, ref.guild_id={_ref_gid}")
-                            logger.info(f"[DiscordDebug] ref.resolved={_ref_resolved}")
-                            if _ref_resolved:
-                                logger.info(f"[DiscordDebug] resolved.content={_ref_resolved.content}")
-                except Exception as _e:
-                    logger.info(f"[DiscordDebug] error inspecting message_obj: {_e}")
                 discord_msg_id = event.message_obj.message_id
                 if discord_msg_id:
                     msg_text = DiscordWebhookManager.format_message_content(message_chain)
@@ -434,17 +434,33 @@ class MsgTransfer(star.Star):
             # 非 webhook 目标（如 QQ），通过 AstrBot 框架发送
             try:
                 from astrbot.core.message.message_event_result import MessageChain
-                from astrbot.core.message.components import Plain as APlain
                 sender_name = event.get_sender_name()
                 source_platform_name = event.get_platform_name()
-                # 将整个消息合并为一行，确保 QQ 回复引用能抓到完整内容
                 msg_text = DiscordWebhookManager.format_message_content(message_chain)
                 if msg_text:
                     full_text = f"[转发] {sender_name} ({source_platform_name}): {msg_text}"
                 else:
                     full_text = f"[转发] {sender_name} ({source_platform_name})"
+
+                # Discord 端回复消息时，检测引用关系并还原 QQ 引用链
+                chain_parts = []
+                if source_platform_name == "discord":
+                    _raw = getattr(event.message_obj, 'raw_message', None)
+                    if _raw:
+                        _ref = getattr(_raw, 'reference', None)
+                        if _ref and _ref.message_id:
+                            orig_qq_id = self.store.find_qq_msg_id_by_discord_id(str(_ref.message_id))
+                            if orig_qq_id:
+                                meta = self.store.get_msg_meta(orig_qq_id)
+                                if meta:
+                                    chain_parts.append(Reply(id=orig_qq_id))
+                                    chain_parts.append(At(qq=meta['user_id']))
+                                else:
+                                    chain_parts.append(Reply(id=orig_qq_id))
+
+                chain_parts.append(Plain(text=full_text))
                 chain = MessageChain()
-                chain.chain = [APlain(full_text)]
+                chain.chain = chain_parts
                 sent = await self.context.send_message(target, chain)
                 if sent:
                     logger.info(f"已转发 #{rid} -> {target}")
@@ -590,7 +606,9 @@ class MsgTransfer(star.Star):
             if discord_msg_id:
                 qq_msg_id = event.message_obj.message_id
                 if qq_msg_id:
-                    self.store.set_msg_mapping(qq_msg_id, discord_msg_id)
+                    qq_user_id = event.get_sender_id()
+                    qq_user_name = event.get_sender_name()
+                    self.store.set_msg_mapping(qq_msg_id, discord_msg_id, qq_user_id, qq_user_name)
                 return True
 
             return False
