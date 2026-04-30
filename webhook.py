@@ -50,7 +50,7 @@ class DiscordWebhookManager:
             return False
         try:
             client = platform_inst.client
-            if hasattr(client, 'user') and client.user and hasattr(client, 'create_webhook'):
+            if hasattr(client, 'user') and client.user and hasattr(client, 'get_channel'):
                 self._discord_client = client
                 return True
         except Exception:
