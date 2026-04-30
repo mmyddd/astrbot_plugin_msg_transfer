@@ -532,6 +532,8 @@ class MsgTransfer(star.Star):
                         parsed_text = re.sub(r'@[^\s(]+\(\d+\)\s*', '', parsed_text).strip()
                         if parsed_text:
                             quote_text = parsed_text
+                    if parsed_sender:
+                        discord_sender_name = parsed_sender
             # 查找之前转发该 QQ 消息时产生的 Discord 消息 ID
             reply_to_discord_id = None
             if reply_to_qq_id:
