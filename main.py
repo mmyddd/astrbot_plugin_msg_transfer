@@ -418,6 +418,8 @@ class MsgTransfer(star.Star):
                         quote_text = seg.text
                     if hasattr(seg, "sender_name") and not quote_sender:
                         quote_sender = seg.sender_name
+                    if hasattr(seg, "sender_nickname") and not quote_sender:
+                        quote_sender = seg.sender_nickname
                     if not quote_text and hasattr(seg, "message_str") and seg.message_str:
                         quote_text = seg.message_str
                     if not quote_text and hasattr(seg, "chain") and seg.chain:
