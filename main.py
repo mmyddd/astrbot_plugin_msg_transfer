@@ -514,6 +514,8 @@ class MsgTransfer(star.Star):
                         reply_to_qq_id = str(seg.id)
                     break
 
+            logger.info(f"[QuoteDebug] quote_text={quote_text!r}, quote_sender={quote_sender!r}, reply_to_qq_id={reply_to_qq_id!r}")
+
             discord_sender_name = None
             discord_sender_id = None
             # 如果引用文本是 AstrBot 自动转发的格式（[转发]），解析原始发送者和消息
