@@ -402,7 +402,6 @@ class MsgTransfer(star.Star):
             sender_id = event.get_sender_id()
             source_platform = event.get_platform_name()
 
-            # 加载QQ号-名称映射
             mapping = self.store.load_mappings()
 
             # 检查是否有引用消息（Quote/Reply）
@@ -427,7 +426,6 @@ class MsgTransfer(star.Star):
                                 fname = getattr(sub, "name", None) or getattr(sub, "filename", None) or "文件"
                                 quote_text = f"[{fname}]"
                                 break
-                    # 取被回复消息的 QQ 消息 ID，用于查找对应的 Discord 消息
                     if hasattr(seg, "id") and seg.id:
                         reply_to_qq_id = str(seg.id)
                     break
@@ -449,17 +447,40 @@ class MsgTransfer(star.Star):
                 else:
                     new_chain.append(seg)
 
-            # 构建引用文本（无对应 Discord 消息时回退到 markdown 引用）
+            virtual_username = DiscordWebhookManager.build_virtual_username(sender_name, source_platform)
+            avatar_url = DiscordWebhookManager.get_avatar_url(source_platform, sender_id)
+            content = DiscordWebhookManager.format_message_content(new_chain)
+
+            # 有对应的 Discord 消息 → 用 Bot 发送原生回复（可点击跳转）
+            if reply_to_discord_id:
+                channel_id = None
+                parts = target_umo.split(":")
+                if len(parts) >= 3:
+                    try:
+                        channel_id = int(parts[2])
+                    except (ValueError, TypeError):
+                        channel_id = None
+                if channel_id:
+                    bot_content = f"**{virtual_username}**:\n{content}" if content else f"**{virtual_username}**"
+                    discord_msg_id = await self.webhook_manager.send_reply_via_bot(
+                        channel_id, bot_content, reply_to_discord_id,
+                    )
+                    if discord_msg_id:
+                        qq_msg_id = event.message_obj.message_id
+                        if qq_msg_id:
+                            self.store.set_msg_mapping(qq_msg_id, discord_msg_id)
+                        return True
+                    # Bot 失败，回退到 webhook + markdown 引用
+                    logger.warning(f"Bot原生回复失败，回退到Webhook #{rule_id}")
+
+            # 用 Webhook 发送（无原生回复时带 markdown 引用）
             quote_block = None
-            if quote_text and not reply_to_discord_id:
+            if quote_text:
                 if (quote_text.startswith('http://') or quote_text.startswith('https://')) and (quote_text.endswith('.jpg') or quote_text.endswith('.png') or quote_text.endswith('.jpeg') or quote_text.endswith('.gif') or quote_text.endswith('.webp')):
                     quote_block = f"> [图片]({quote_text})\n"
                 else:
                     quote_block = f"> {quote_text}\n"
 
-            virtual_username = DiscordWebhookManager.build_virtual_username(sender_name, source_platform)
-            avatar_url = DiscordWebhookManager.get_avatar_url(source_platform, sender_id)
-            content = DiscordWebhookManager.format_message_content(new_chain)
             if quote_block:
                 content = quote_block + content
 
@@ -468,10 +489,8 @@ class MsgTransfer(star.Star):
                 username=virtual_username,
                 avatar_url=avatar_url,
                 content=content,
-                reply_to_message_id=reply_to_discord_id,
             )
 
-            # 存储当前 QQ 消息 ID -> Discord 消息 ID 映射
             if discord_msg_id:
                 qq_msg_id = event.message_obj.message_id
                 if qq_msg_id:
