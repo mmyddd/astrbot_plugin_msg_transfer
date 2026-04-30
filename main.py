@@ -403,28 +403,15 @@ class MsgTransfer(star.Star):
                         quote_sender = seg.sender_name
                     break
 
-            # 替换消息链中的At(QQ)为对应名称，分离 File 段
+            # 替换消息链中的At(QQ)为对应名称
             new_chain = []
-            file_attachments = []
             for seg in message_chain:
                 if seg.__class__.__name__ == "At" and hasattr(seg, "qq"):
                     qq_id = str(seg.qq)
                     qq_name = mapping.get(qq_id, qq_id)
                     new_chain.append(Plain(f"@{qq_name} "))
                 elif seg.__class__.__name__ in ("Quote", "Reply"):
-                    continue
-                elif seg.__class__.__name__ == "File":
-                    filename = seg.name or "文件"
-                    file_url = seg.url or ""
-                    if file_url:
-                        data = await self.webhook_manager._download_file(file_url)
-                        if data:
-                            file_attachments.append((filename, data))
-                            # 文件作为附件上传，文本中只保留文件名提示
-                            new_chain.append(Plain(f"[文件: {filename}]"))
-                            continue
-                    # 下载失败时也保留文件名提示
-                    new_chain.append(Plain(f"[文件: {filename}]"))
+                    continue  # 不直接转发引用段
                 else:
                     new_chain.append(seg)
 
@@ -440,7 +427,7 @@ class MsgTransfer(star.Star):
             # 构建虚拟用户信息
             virtual_username = DiscordWebhookManager.build_virtual_username(sender_name, source_platform)
             avatar_url = DiscordWebhookManager.get_avatar_url(source_platform, sender_id)
-            # 文件处理已完成，直接用format_message_content
+            # 文件处理已在main完成，直接用format_message_content
             content = DiscordWebhookManager.format_message_content(new_chain)
             if quote_block:
                 content = quote_block + content
@@ -449,8 +436,7 @@ class MsgTransfer(star.Star):
                 webhook_url=webhook_url,
                 username=virtual_username,
                 avatar_url=avatar_url,
-                content=content,
-                files=file_attachments if file_attachments else None,
+                content=content
             )
             return success
         except Exception as e:

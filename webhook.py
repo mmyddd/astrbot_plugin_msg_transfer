@@ -1,9 +1,6 @@
 """Discord Webhook管理模块"""
-import asyncio
-import json
 import re
 import aiohttp
-from aiohttp import MultipartWriter
 from astrbot.api import logger
 from astrbot.core.star.star import star_map
 
@@ -202,28 +199,12 @@ class DiscordWebhookManager:
             content += '\n'.join(extra_lines)
         return content
 
-    async def _download_file(self, url: str) -> bytes | None:
-        """从 URL 下载文件到内存"""
-        try:
-            session = await self._get_session()
-            timeout = aiohttp.ClientTimeout(total=60)
-            async with session.get(url, timeout=timeout) as resp:
-                if resp.status == 200:
-                    return await resp.read()
-                logger.warning(f"文件下载失败 [HTTP {resp.status}]: {url[:80]}")
-        except (asyncio.TimeoutError, TimeoutError):
-            logger.warning(f"文件下载超时: {url[:80]}")
-        except Exception as e:
-            logger.warning(f"文件下载异常: {e}")
-        return None
-
     async def send_webhook_message(
         self,
         webhook_url: str,
         username: str,
         avatar_url: str,
-        content: str,
-        files: list[tuple[str, bytes]] | None = None,
+        content: str
     ) -> bool:
         """发送消息到Discord Webhook，复用 aiohttp session"""
         try:
@@ -234,7 +215,7 @@ class DiscordWebhookManager:
             username = self._sanitize_username(username)
             content = self._truncate_content(content)
 
-            payload: dict = {
+            payload = {
                 "content": content,
                 "username": username,
                 "avatar_url": avatar_url,
@@ -243,43 +224,14 @@ class DiscordWebhookManager:
             }
 
             session = await self._get_session()
-
-            if files:
-                # multipart/form-data 上传文件
-                payload["attachments"] = [
-                    {"id": i, "filename": name}
-                    for i, (name, _) in enumerate(files)
-                ]
-                mp = MultipartWriter("form-data")
-                # payload_json 部分
-                part = mp.append(json.dumps(payload).encode("utf-8"))
-                part.set_content_disposition("form-data", name="payload_json")
-                part.headers["Content-Type"] = "application/json"
-                # 文件部分
-                for i, (name, data) in enumerate(files):
-                    part = mp.append(data)
-                    part.set_content_disposition(
-                        "form-data", name=f"file[{i}]", filename=name
+            async with session.post(webhook_url, json=payload) as resp:
+                if resp.status not in (200, 201, 204):
+                    body = await resp.text()
+                    logger.error(
+                        f"Webhook发送失败 [HTTP {resp.status}]: {body[:500]}"
                     )
-                    part.headers["Content-Type"] = "application/octet-stream"
-
-                async with session.post(webhook_url, data=mp) as resp:
-                    if resp.status not in (200, 201, 204):
-                        body = await resp.text()
-                        logger.error(
-                            f"Webhook发送失败 [HTTP {resp.status}]: {body[:500]}"
-                        )
-                        return False
-                    return True
-            else:
-                async with session.post(webhook_url, json=payload) as resp:
-                    if resp.status not in (200, 201, 204):
-                        body = await resp.text()
-                        logger.error(
-                            f"Webhook发送失败 [HTTP {resp.status}]: {body[:500]}"
-                        )
-                        return False
-                    return True
+                    return False
+                return True
         except Exception as e:
             logger.error(f"Webhook发送异常: {e}")
             return False
