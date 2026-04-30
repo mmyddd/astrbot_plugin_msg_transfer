@@ -73,32 +73,61 @@ class MsgTransferStore:
         self.forward_log_file = forward_log_file
         self._ensure_files()
 
+        # ---- In-memory caches ----
+        self._rules = None
+        self._pending = None
+        self._webhooks = None
+        self._mappings = None
+        self._msg_mapping = None
+        self._forward_log = None
+
+        # ---- Indexes for fast O(1) lookups ----
+        self._reverse_idx = None       # discord_msg_id → qq_msg_id
+        self._forward_text_idx = None   # content → (discord_msg_id, timestamp)
+
     def _ensure_files(self):
         self.rule_file.parent.mkdir(parents=True, exist_ok=True)
         for f in (self.rule_file, self.pending_file, self.webhook_file, self.mapping_file, self.msg_mapping_file, self.forward_log_file):
             if not f.exists():
                 f.write_text("{}", encoding="utf-8")
 
+    def _rebuild_reverse_idx(self):
+        self._reverse_idx = {}
+        if self._msg_mapping is None:
+            return
+        for qq_id, val in self._msg_mapping.items():
+            d_id = val.split('|')[0] if isinstance(val, str) and '|' in val else str(val)
+            self._reverse_idx[d_id] = qq_id
+
+    def _rebuild_forward_idx(self):
+        self._forward_text_idx = {}
+        if self._forward_log is None:
+            return
+        for d_msg_id, entry in self._forward_log.items():
+            content = entry.get("content", "")
+            ts = entry.get("timestamp", 0)
+            if content:
+                existing = self._forward_text_idx.get(content)
+                if existing is None or ts > existing[1]:
+                    self._forward_text_idx[content] = (d_msg_id, ts)
+
     # ----- rules -----
     def load_rules(self):
-        return load_json(self.rule_file)
+        if self._rules is None:
+            self._rules = load_json(self.rule_file)
+        return self._rules
 
     def save_rules(self, data: dict):
+        self._rules = data
         save_json(self.rule_file, data)
 
     def add_rule(self, source_umo: str, target_umo: str) -> str:
         data = self.load_rules()
-
-        # 查重
         for rid, rule in data.items():
             if rule["source_umo"] == source_umo and rule["target_umo"] == target_umo:
                 raise ValueError(f"规则已存在 #{rid}")
-
         new_id = str(max(map(int, data.keys()), default=0) + 1)
-        data[new_id] = {
-            "source_umo": source_umo,
-            "target_umo": target_umo
-        }
+        data[new_id] = {"source_umo": source_umo, "target_umo": target_umo}
         self.save_rules(data)
         return new_id
 
@@ -111,50 +140,41 @@ class MsgTransferStore:
 
     def list_rules(self, source_umo):
         data = self.load_rules()
-        
-        # 首先尝试精确匹配
         exact_matches = {rid: r for rid, r in data.items() if r["source_umo"] == source_umo}
         if exact_matches:
             return exact_matches
-        
-        # 如果精确匹配失败，尝试模糊匹配（处理会话隔离关闭的情况）
-        # 当会话隔离关闭时，source_umo 格式从 "platform:GroupMessage:group_user" 变成 "platform:GroupMessage:user"
+
         fuzzy_matches = {}
-        
         try:
             parts = source_umo.split(":")
             if len(parts) >= 3:
                 platform = parts[0]
                 msg_type = parts[1]
-                current_id_part = parts[2]  # 可能是用户ID或群组_用户ID
-                
+                current_id_part = parts[2]
                 for rid, rule in data.items():
                     rule_source = rule["source_umo"]
                     rule_parts = rule_source.split(":")
-                    
                     if len(rule_parts) >= 3:
                         rule_platform = rule_parts[0]
                         rule_msg_type = rule_parts[1]
                         rule_id_part = rule_parts[2]
-                        
-                        # 检查平台和消息类型是否匹配
                         if rule_platform == platform and rule_msg_type == msg_type:
-                            # 检查ID是否匹配（可能是完整匹配或后缀匹配）
-                            if (rule_id_part == current_id_part or 
+                            if (rule_id_part == current_id_part or
                                 rule_id_part.endswith("_" + current_id_part) or
                                 current_id_part.endswith("_" + rule_id_part)):
                                 fuzzy_matches[rid] = rule
-        
         except Exception as e:
             logger.error(f"[FuzzyMatch] 模糊匹配异常: {e}")
-        
         return fuzzy_matches
 
     # ----- pending -----
     def load_pending(self):
-        return load_json(self.pending_file)
+        if self._pending is None:
+            self._pending = load_json(self.pending_file)
+        return self._pending
 
     def save_pending(self, data: dict):
+        self._pending = data
         save_json(self.pending_file, data)
 
     def add_pending(self, code: str, source_umo: str):
@@ -172,9 +192,12 @@ class MsgTransferStore:
 
     # ----- webhook -----
     def load_webhooks(self):
-        return load_json(self.webhook_file)
+        if self._webhooks is None:
+            self._webhooks = load_json(self.webhook_file)
+        return self._webhooks
 
     def save_webhooks(self, data: dict):
+        self._webhooks = data
         save_json(self.webhook_file, data)
 
     def set_webhook_url(self, target_umo: str, webhook_url: str):
@@ -183,29 +206,35 @@ class MsgTransferStore:
         self.save_webhooks(data)
 
     def get_webhook_url(self, target_umo: str) -> str | None:
-        data = self.load_webhooks()
-        return data.get(target_umo)
+        return self.load_webhooks().get(target_umo)
 
     def remove_webhook_url(self, target_umo: str):
         data = self.load_webhooks()
-        if target_umo in data:
-            del data[target_umo]
-            self.save_webhooks(data)
+        data.pop(target_umo, None)
+        self.save_webhooks(data)
 
-    # ----- mapping -----
+    # ----- mapping (QQ号 ↔ QQ昵称) -----
     def load_mappings(self):
-        return load_json(self.mapping_file)
+        if self._mappings is None:
+            self._mappings = load_json(self.mapping_file)
+        return self._mappings
 
     def save_mappings(self, data: dict):
+        self._mappings = data
         save_json(self.mapping_file, data)
 
-    # ----- msg_id mapping (QQ msg_id -> Discord msg_id) -----
+    # ----- msg_id mapping (QQ msg_id ↔ Discord msg_id) -----
     MAX_MSG_MAPPINGS = 2000
 
     def load_msg_mapping(self):
-        return load_json(self.msg_mapping_file)
+        if self._msg_mapping is None:
+            self._msg_mapping = load_json(self.msg_mapping_file)
+            self._rebuild_reverse_idx()
+        return self._msg_mapping
 
     def save_msg_mapping(self, data: dict):
+        self._msg_mapping = data
+        self._rebuild_reverse_idx()
         save_json(self.msg_mapping_file, data)
 
     def set_msg_mapping(self, qq_msg_id: str, discord_msg_id: str, qq_user_id: str = "", qq_user_name: str = ""):
@@ -215,80 +244,77 @@ class MsgTransferStore:
         else:
             data[qq_msg_id] = discord_msg_id
         if len(data) > self.MAX_MSG_MAPPINGS:
-            keys = list(data.keys())[:len(data) // 2]
-            for k in keys:
+            trimmed = list(data.keys())[:len(data) // 2]
+            for k in trimmed:
                 del data[k]
-        self.save_msg_mapping(data)
+            self._rebuild_reverse_idx()
+        else:
+            self._reverse_idx[str(discord_msg_id)] = qq_msg_id
+        save_json(self.msg_mapping_file, data)
 
     def get_msg_mapping(self, qq_msg_id: str) -> str | None:
-        data = self.load_msg_mapping()
-        val = data.get(qq_msg_id)
+        val = self.load_msg_mapping().get(qq_msg_id)
         if val and isinstance(val, str) and '|' in val:
             return val.split('|')[0]
         return val
 
     def get_msg_meta(self, qq_msg_id: str) -> dict | None:
-        """获取QQ消息的发送者信息"""
-        data = self.load_msg_mapping()
-        val = data.get(qq_msg_id)
+        val = self.load_msg_mapping().get(qq_msg_id)
         if val and isinstance(val, str) and '|' in val:
             parts = val.split('|')
             return {"user_id": parts[1], "user_name": parts[2] if len(parts) > 2 else parts[1]}
         return None
 
     def find_qq_msg_id_by_discord_id(self, discord_msg_id: str) -> str | None:
-        """反向查找：通过 Discord 消息 ID 找到对应的 QQ 消息 ID"""
-        data = self.load_msg_mapping()
-        for qq_id, val in data.items():
-            d_id = val.split('|')[0] if isinstance(val, str) and '|' in val else val
-            if str(d_id) == str(discord_msg_id):
-                return qq_id
-        return None
+        if self._reverse_idx is None:
+            self.load_msg_mapping()
+        return self._reverse_idx.get(str(discord_msg_id))
 
     # ----- forward_log (Discord→QQ 消息记录，用于回复引用链) -----
     MAX_FORWARD_LOG = 200
 
     def load_forward_log(self):
-        return load_json(self.forward_log_file)
+        if self._forward_log is None:
+            self._forward_log = load_json(self.forward_log_file)
+            self._rebuild_forward_idx()
+        return self._forward_log
 
     def save_forward_log(self, data: dict):
+        self._forward_log = data
+        self._rebuild_forward_idx()
         save_json(self.forward_log_file, data)
 
     def add_forward_log(self, discord_msg_id: str, content: str, sender_id: str = ""):
-        """记录一条从 Discord 转发到 QQ 的消息"""
         data = self.load_forward_log()
-        data[discord_msg_id] = {
-            "content": content,
-            "sender_id": sender_id,
-            "timestamp": __import__("time").time()
-        }
+        ts = __import__("time").time()
+        data[discord_msg_id] = {"content": content, "sender_id": sender_id, "timestamp": ts}
         if len(data) > self.MAX_FORWARD_LOG:
-            sorted_keys = sorted(data, key=lambda k: data[k]["timestamp"])
-            for k in sorted_keys[:len(data) // 2]:
+            for k in sorted(data, key=lambda k: data[k]["timestamp"])[:len(data) // 2]:
                 del data[k]
-        self.save_forward_log(data)
+            self._rebuild_forward_idx()
+        elif content:
+            existing = self._forward_text_idx.get(content)
+            if existing is None or ts > existing[1]:
+                self._forward_text_idx[content] = (discord_msg_id, ts)
+        save_json(self.forward_log_file, data)
 
     def find_forward_log_by_content(self, content: str) -> str | None:
-        """通过消息内容查找最近转发的 Discord 消息 ID"""
         if not content:
             return None
-        data = self.load_forward_log()
-        best = None
-        best_time = 0
-        for d_msg_id, entry in data.items():
-            if entry.get("content") == content and entry.get("timestamp", 0) > best_time:
-                best = d_msg_id
-                best_time = entry["timestamp"]
-        return best
+        if self._forward_text_idx is None:
+            self.load_forward_log()
+        result = self._forward_text_idx.get(content)
+        return result[0] if result else None
 
     def find_forward_log_sender(self, content: str) -> str | None:
-        """通过消息内容查找转发消息的 Discord 发送者 ID"""
         if not content:
             return None
-        data = self.load_forward_log()
-        for d_msg_id, entry in data.items():
-            if entry.get("content") == content:
-                return entry.get("sender_id")
+        if self._forward_text_idx is None:
+            self.load_forward_log()
+        result = self._forward_text_idx.get(content)
+        if result:
+            entry = self._forward_log.get(result[0], {})
+            return entry.get("sender_id")
         return None
 
 
