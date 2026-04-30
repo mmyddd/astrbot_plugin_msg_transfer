@@ -549,8 +549,9 @@ class MsgTransfer(star.Star):
             for seg in message_chain:
                 if seg.__class__.__name__ == "At" and hasattr(seg, "qq"):
                     qq_id = str(seg.qq)
-                    # 如果 At 的是机器人自身且有解析出的 Discord 发送者，用 Discord 原生 @mention 或名称
                     self_id = event.get_self_id()
+                    logger.info(f"[AtDebug] qq_id={qq_id}, self_id={self_id}, discord_sender_id={discord_sender_id}, discord_sender_name={discord_sender_name}")
+                    # 如果 At 的是机器人自身且有解析出的 Discord 发送者，用 Discord 原生 @mention 或名称
                     if self_id and qq_id == self_id:
                         if discord_sender_id:
                             new_chain.append(Plain(f"<@{discord_sender_id}> "))
