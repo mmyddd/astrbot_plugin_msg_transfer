@@ -1,4 +1,5 @@
 import json
+import re
 import secrets
 from pathlib import Path
 
@@ -63,17 +64,18 @@ def gen_code(n=6):
 # 存储层（无锁简化）
 # ------------------------
 class MsgTransferStore:
-    def __init__(self, rule_file: Path, pending_file: Path, webhook_file: Path, mapping_file: Path, msg_mapping_file: Path):
+    def __init__(self, rule_file: Path, pending_file: Path, webhook_file: Path, mapping_file: Path, msg_mapping_file: Path, forward_log_file: Path):
         self.rule_file = rule_file
         self.pending_file = pending_file
         self.webhook_file = webhook_file
         self.mapping_file = mapping_file
         self.msg_mapping_file = msg_mapping_file
+        self.forward_log_file = forward_log_file
         self._ensure_files()
 
     def _ensure_files(self):
         self.rule_file.parent.mkdir(parents=True, exist_ok=True)
-        for f in (self.rule_file, self.pending_file, self.webhook_file, self.mapping_file, self.msg_mapping_file):
+        for f in (self.rule_file, self.pending_file, self.webhook_file, self.mapping_file, self.msg_mapping_file, self.forward_log_file):
             if not f.exists():
                 f.write_text("{}", encoding="utf-8")
 
@@ -220,6 +222,41 @@ class MsgTransferStore:
         data = self.load_msg_mapping()
         return data.get(qq_msg_id)
 
+    # ----- forward_log (Discord→QQ 消息记录，用于回复引用链) -----
+    MAX_FORWARD_LOG = 200
+
+    def load_forward_log(self):
+        return load_json(self.forward_log_file)
+
+    def save_forward_log(self, data: dict):
+        save_json(self.forward_log_file, data)
+
+    def add_forward_log(self, discord_msg_id: str, content: str):
+        """记录一条从 Discord 转发到 QQ 的消息"""
+        data = self.load_forward_log()
+        data[discord_msg_id] = {
+            "content": content,
+            "timestamp": __import__("time").time()
+        }
+        if len(data) > self.MAX_FORWARD_LOG:
+            sorted_keys = sorted(data, key=lambda k: data[k]["timestamp"])
+            for k in sorted_keys[:len(data) // 2]:
+                del data[k]
+        self.save_forward_log(data)
+
+    def find_forward_log_by_content(self, content: str) -> str | None:
+        """通过消息内容查找最近转发的 Discord 消息 ID"""
+        if not content:
+            return None
+        data = self.load_forward_log()
+        best = None
+        best_time = 0
+        for d_msg_id, entry in data.items():
+            if entry.get("content") == content and entry.get("timestamp", 0) > best_time:
+                best = d_msg_id
+                best_time = entry["timestamp"]
+        return best
+
 
 # ------------------------
 # 插件主体
@@ -230,12 +267,13 @@ class MsgTransfer(star.Star):
         # 使用 AstrBot 提供的标准方法获取项目持久化数据存储目录
         self.data_dir = star.StarTools.get_data_dir("msg_transfer")
         self.rule_file = self.data_dir / "rules.json"
+        self.forward_log_file = self.data_dir / "forward_log.json"
         self.pending_file = self.data_dir / "pending.json"
         self.webhook_file = self.data_dir / "webhooks.json"
         self.mapping_file = self.data_dir / "mappings.json"
         self.msg_mapping_file = self.data_dir / "msg_mapping.json"
 
-        self.store = MsgTransferStore(self.rule_file, self.pending_file, self.webhook_file, self.mapping_file, self.msg_mapping_file)
+        self.store = MsgTransferStore(self.rule_file, self.pending_file, self.webhook_file, self.mapping_file, self.msg_mapping_file, self.forward_log_file)
         self.webhook_manager = DiscordWebhookManager(context)
 
     async def initialize(self):
@@ -324,6 +362,14 @@ class MsgTransfer(star.Star):
             if not rules:
                 return
             message_chain = event.get_messages()
+            # 记录从 Discord 转发的消息，供 QQ 回复引用时还原跳转链接
+            platform = event.get_platform_name()
+            if platform == "discord":
+                discord_msg_id = event.message_obj.message_id
+                if discord_msg_id:
+                    msg_text = DiscordWebhookManager.format_message_content(message_chain)
+                    if msg_text:
+                        self.store.add_forward_log(str(discord_msg_id), msg_text)
             # 顺序依次await每个转发，保证顺序
             for rid, rule in rules.items():
                 await self._forward_single_rule(event, rule, rid, source_umo, message_chain)
@@ -390,10 +436,30 @@ class MsgTransfer(star.Star):
                         reply_to_qq_id = str(seg.id)
                     break
 
+            # 如果引用文本是 AstrBot 自动转发的格式（[转发]），解析原始发送者和消息
+            if quote_text and quote_text.strip().startswith('[转发]'):
+                fwd_match = re.match(
+                    r"^[转发]\s+(.+?)(?:\s+\(\d+\))?\s*[：:]\s*(.*)",
+                    quote_text.strip()
+                )
+                if fwd_match:
+                    parsed_sender = fwd_match.group(1).strip()
+                    parsed_text = fwd_match.group(2).strip()
+                    if parsed_sender:
+                        quote_sender = parsed_sender
+                    if parsed_text:
+                        quote_text = parsed_text
+
             # 查找之前转发该 QQ 消息时产生的 Discord 消息 ID
             reply_to_discord_id = None
             if reply_to_qq_id:
                 reply_to_discord_id = self.store.get_msg_mapping(reply_to_qq_id)
+
+            # 如果 msg_mapping 中找不到（D→Q 方向），尝试从 forward_log 匹配
+            if reply_to_discord_id is None and quote_text:
+                fwd_discord_id = self.store.find_forward_log_by_content(quote_text)
+                if fwd_discord_id:
+                    reply_to_discord_id = fwd_discord_id
 
             # 替换消息链中的At(QQ)为对应名称
             new_chain = []
