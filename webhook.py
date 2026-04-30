@@ -226,7 +226,7 @@ class DiscordWebhookManager:
                 "content": content,
                 "username": username,
                 "avatar_url": avatar_url,
-                "allowed_mentions": {"parse": []},
+                "allowed_mentions": {"parse": ["users"]},
             }
 
             session = await self._get_session()
