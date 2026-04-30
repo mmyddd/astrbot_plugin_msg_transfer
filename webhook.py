@@ -246,23 +246,6 @@ class DiscordWebhookManager:
             logger.error(f"Webhook发送异常: {e}")
             return None
 
-    async def send_reply_via_bot(self, channel_id: int, content: str, reply_to_message_id: str) -> str | None:
-        """使用 Discord Bot 发送原生回复消息（可点击跳转），返回 Discord 消息 ID"""
-        client = self._get_discord_client()
-        if not client:
-            logger.warning("无法获取 Discord 客户端，无法发送原生回复")
-            return None
-        try:
-            channel = client.get_channel(channel_id)
-            if not channel:
-                channel = await client.fetch_channel(channel_id)
-            msg = await channel.fetch_message(int(reply_to_message_id))
-            sent = await msg.reply(content)
-            return str(sent.id)
-        except Exception as e:
-            logger.error(f"Bot发送原生回复失败: {e}")
-            return None
-
     @staticmethod
     def build_virtual_username(sender_name: str, source_platform: str) -> str:
         """构建虚拟用户名"""

@@ -451,7 +451,7 @@ class MsgTransfer(star.Star):
             avatar_url = DiscordWebhookManager.get_avatar_url(source_platform, sender_id)
             content = DiscordWebhookManager.format_message_content(new_chain)
 
-            # 有对应的 Discord 消息 → 用 Bot 发送原生回复（可点击跳转）
+            # 有对应的 Discord 消息 → 在 webhook 内容中插入跳转链接
             if reply_to_discord_id:
                 channel_id = None
                 parts = target_umo.split(":")
@@ -460,28 +460,31 @@ class MsgTransfer(star.Star):
                         channel_id = int(parts[2])
                     except (ValueError, TypeError):
                         channel_id = None
-                if channel_id:
-                    bot_content = f"**{virtual_username}**:\n{content}" if content else f"**{virtual_username}**"
-                    discord_msg_id = await self.webhook_manager.send_reply_via_bot(
-                        channel_id, bot_content, reply_to_discord_id,
-                    )
-                    if discord_msg_id:
-                        qq_msg_id = event.message_obj.message_id
-                        if qq_msg_id:
-                            self.store.set_msg_mapping(qq_msg_id, discord_msg_id)
-                        return True
-                    # Bot 失败，回退到 webhook + markdown 引用
-                    logger.warning(f"Bot原生回复失败，回退到Webhook #{rule_id}")
 
-            # 用 Webhook 发送（无原生回复时带 markdown 引用）
-            quote_block = None
-            if quote_text:
+                jump_url = None
+                if channel_id:
+                    try:
+                        client = self.webhook_manager._get_discord_client()
+                        if client:
+                            channel = await client.fetch_channel(channel_id)
+                            if hasattr(channel, 'guild') and channel.guild:
+                                guild_id = channel.guild.id
+                                jump_url = f"https://discord.com/channels/{guild_id}/{channel_id}/{reply_to_discord_id}"
+                    except Exception:
+                        pass
+
+                if jump_url:
+                    label = quote_text or "引用消息"
+                    content = f"> [{label}]({jump_url})\n{content}"
+                elif quote_text:
+                    content = f"> {quote_text}\n{content}"
+
+            # 无原生回复时带 markdown 引用
+            elif quote_text:
                 if (quote_text.startswith('http://') or quote_text.startswith('https://')) and (quote_text.endswith('.jpg') or quote_text.endswith('.png') or quote_text.endswith('.jpeg') or quote_text.endswith('.gif') or quote_text.endswith('.webp')):
                     quote_block = f"> [图片]({quote_text})\n"
                 else:
                     quote_block = f"> {quote_text}\n"
-
-            if quote_block:
                 content = quote_block + content
 
             discord_msg_id = await self.webhook_manager.send_webhook_message(
