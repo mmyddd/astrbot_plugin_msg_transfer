@@ -1,8 +1,10 @@
+import asyncio
 import json
 import re
 import secrets
 import time
 import urllib.parse
+from collections import OrderedDict
 from pathlib import Path
 
 import astrbot.api.star as star
@@ -64,7 +66,7 @@ def gen_code(n=6):
 
 
 # ------------------------
-# 存储层（无锁简化）
+# 存储层（带异步锁与 LRU 淘汰）
 # ------------------------
 class MsgTransferStore:
     def __init__(self, rule_file: Path, pending_file: Path, webhook_file: Path, mapping_file: Path, msg_mapping_file: Path, forward_log_file: Path):
@@ -75,6 +77,8 @@ class MsgTransferStore:
         self.msg_mapping_file = msg_mapping_file
         self.forward_log_file = forward_log_file
         self._ensure_files()
+
+        self._lock = asyncio.Lock()
 
         # ---- In-memory caches ----
         self._rules = None
@@ -93,6 +97,10 @@ class MsgTransferStore:
         for f in (self.rule_file, self.pending_file, self.webhook_file, self.mapping_file, self.msg_mapping_file, self.forward_log_file):
             if not f.exists():
                 f.write_text("{}", encoding="utf-8")
+
+    async def _write_json(self, path: Path, data: dict):
+        async with self._lock:
+            save_json(path, data)
 
     def _rebuild_reverse_idx(self):
         self._reverse_idx = {}
@@ -120,26 +128,26 @@ class MsgTransferStore:
             self._rules = load_json(self.rule_file)
         return self._rules
 
-    def save_rules(self, data: dict):
+    async def save_rules(self, data: dict):
         self._rules = data
-        save_json(self.rule_file, data)
+        await self._write_json(self.rule_file, data)
 
-    def add_rule(self, source_umo: str, target_umo: str) -> str:
+    async def add_rule(self, source_umo: str, target_umo: str) -> str:
         data = self.load_rules()
         for rid, rule in data.items():
             if rule["source_umo"] == source_umo and rule["target_umo"] == target_umo:
                 raise ValueError(f"规则已存在 #{rid}")
         new_id = str(max(map(int, data.keys()), default=0) + 1)
         data[new_id] = {"source_umo": source_umo, "target_umo": target_umo}
-        self.save_rules(data)
+        await self.save_rules(data)
         return new_id
 
-    def delete_rule(self, rid: str):
+    async def delete_rule(self, rid: str):
         data = self.load_rules()
         if rid not in data:
             raise KeyError("规则不存在")
         data.pop(rid)
-        self.save_rules(data)
+        await self.save_rules(data)
 
     def list_rules(self, source_umo):
         data = self.load_rules()
@@ -176,21 +184,21 @@ class MsgTransferStore:
             self._pending = load_json(self.pending_file)
         return self._pending
 
-    def save_pending(self, data: dict):
+    async def save_pending(self, data: dict):
         self._pending = data
-        save_json(self.pending_file, data)
+        await self._write_json(self.pending_file, data)
 
-    def add_pending(self, code: str, source_umo: str):
+    async def add_pending(self, code: str, source_umo: str):
         p = self.load_pending()
         p[code] = source_umo
-        self.save_pending(p)
+        await self.save_pending(p)
 
-    def pop_pending(self, code: str):
+    async def pop_pending(self, code: str):
         p = self.load_pending()
         if code not in p:
             raise KeyError("绑定码不存在或已使用")
         source_umo = p.pop(code)
-        self.save_pending(p)
+        await self.save_pending(p)
         return source_umo
 
     # ----- webhook -----
@@ -199,22 +207,22 @@ class MsgTransferStore:
             self._webhooks = load_json(self.webhook_file)
         return self._webhooks
 
-    def save_webhooks(self, data: dict):
+    async def save_webhooks(self, data: dict):
         self._webhooks = data
-        save_json(self.webhook_file, data)
+        await self._write_json(self.webhook_file, data)
 
-    def set_webhook_url(self, target_umo: str, webhook_url: str):
+    async def set_webhook_url(self, target_umo: str, webhook_url: str):
         data = self.load_webhooks()
         data[target_umo] = webhook_url
-        self.save_webhooks(data)
+        await self.save_webhooks(data)
 
     def get_webhook_url(self, target_umo: str) -> str | None:
         return self.load_webhooks().get(target_umo)
 
-    def remove_webhook_url(self, target_umo: str):
+    async def remove_webhook_url(self, target_umo: str):
         data = self.load_webhooks()
         data.pop(target_umo, None)
-        self.save_webhooks(data)
+        await self.save_webhooks(data)
 
     # ----- mapping (QQ号 ↔ QQ昵称) -----
     def load_mappings(self):
@@ -222,48 +230,71 @@ class MsgTransferStore:
             self._mappings = load_json(self.mapping_file)
         return self._mappings
 
-    def save_mappings(self, data: dict):
+    async def save_mappings(self, data: dict):
         self._mappings = data
-        save_json(self.mapping_file, data)
+        await self._write_json(self.mapping_file, data)
 
     # ----- msg_id mapping (QQ msg_id ↔ Discord msg_id) -----
     MAX_MSG_MAPPINGS = 2000
+    MSG_MAPPING_TRIM = 100  # 超过上限时一次性淘汰的条目数
 
     def load_msg_mapping(self):
         if self._msg_mapping is None:
-            self._msg_mapping = load_json(self.msg_mapping_file)
+            raw = load_json(self.msg_mapping_file)
+            self._msg_mapping = OrderedDict(raw)
             self._rebuild_reverse_idx()
         return self._msg_mapping
 
-    def save_msg_mapping(self, data: dict):
+    async def save_msg_mapping(self, data: OrderedDict):
         self._msg_mapping = data
         self._rebuild_reverse_idx()
-        save_json(self.msg_mapping_file, data)
+        await self._write_json(self.msg_mapping_file, dict(data))
 
-    def set_msg_mapping(self, qq_msg_id: str, discord_msg_id: str, qq_user_id: str = "", qq_user_name: str = ""):
+    async def set_msg_mapping(self, qq_msg_id: str, discord_msg_id: str, qq_user_id: str = "", qq_user_name: str = ""):
         data = self.load_msg_mapping()
+
+        # 清除该 qq_msg_id 在 reverse_idx 中的旧映射，避免 stale 条目
+        if qq_msg_id in data:
+            old_val = data[qq_msg_id]
+            old_d_id = old_val.split('|')[0] if isinstance(old_val, str) and '|' in old_val else str(old_val)
+            self._reverse_idx.pop(old_d_id, None)
+
         if qq_user_id:
             data[qq_msg_id] = f"{discord_msg_id}|{qq_user_id}|{qq_user_name}"
         else:
             data[qq_msg_id] = discord_msg_id
+
         if len(data) > self.MAX_MSG_MAPPINGS:
-            trimmed = list(data.keys())[:len(data) // 2]
-            for k in trimmed:
-                del data[k]
+            # 淘汰最旧的条目（OrderedDict 保持插入顺序 == 大体时间顺序）
+            for _ in range(self.MSG_MAPPING_TRIM):
+                try:
+                    data.popitem(last=False)
+                except KeyError:
+                    break
             self._rebuild_reverse_idx()
         else:
             self._reverse_idx[str(discord_msg_id)] = qq_msg_id
-        save_json(self.msg_mapping_file, data)
+
+        await self._write_json(self.msg_mapping_file, dict(data))
 
     def get_msg_mapping(self, qq_msg_id: str) -> str | None:
-        val = self.load_msg_mapping().get(qq_msg_id)
-        if val and isinstance(val, str) and '|' in val:
+        data = self.load_msg_mapping()
+        val = data.get(qq_msg_id)
+        if val is None:
+            return None
+        # LRU: 访问过的条目移到末尾
+        data.move_to_end(qq_msg_id)
+        if isinstance(val, str) and '|' in val:
             return val.split('|')[0]
         return val
 
     def get_msg_meta(self, qq_msg_id: str) -> dict | None:
-        val = self.load_msg_mapping().get(qq_msg_id)
-        if val and isinstance(val, str) and '|' in val:
+        data = self.load_msg_mapping()
+        val = data.get(qq_msg_id)
+        if val is None:
+            return None
+        data.move_to_end(qq_msg_id)
+        if isinstance(val, str) and '|' in val:
             parts = val.split('|')
             return {"user_id": parts[1], "user_name": parts[2] if len(parts) > 2 else parts[1]}
         return None
@@ -275,6 +306,7 @@ class MsgTransferStore:
 
     # ----- forward_log (Discord→QQ 消息记录，用于回复引用链) -----
     MAX_FORWARD_LOG = 200
+    FORWARD_LOG_TRIM = 50
 
     def load_forward_log(self):
         if self._forward_log is None:
@@ -282,24 +314,24 @@ class MsgTransferStore:
             self._rebuild_forward_idx()
         return self._forward_log
 
-    def save_forward_log(self, data: dict):
+    async def save_forward_log(self, data: dict):
         self._forward_log = data
         self._rebuild_forward_idx()
-        save_json(self.forward_log_file, data)
+        await self._write_json(self.forward_log_file, data)
 
-    def add_forward_log(self, discord_msg_id: str, content: str, sender_id: str = ""):
+    async def add_forward_log(self, discord_msg_id: str, content: str, sender_id: str = ""):
         data = self.load_forward_log()
         ts = time.time()
         data[discord_msg_id] = {"content": content, "sender_id": sender_id, "timestamp": ts}
         if len(data) > self.MAX_FORWARD_LOG:
-            for k in sorted(data, key=lambda k: data[k]["timestamp"])[:len(data) // 2]:
+            for k in sorted(data, key=lambda k: data[k]["timestamp"])[:self.FORWARD_LOG_TRIM]:
                 del data[k]
             self._rebuild_forward_idx()
         elif content:
             existing = self._forward_text_idx.get(content)
             if existing is None or ts > existing[1]:
                 self._forward_text_idx[content] = (discord_msg_id, ts)
-        save_json(self.forward_log_file, data)
+        await self._write_json(self.forward_log_file, data)
 
     def get_forward_entry_sender(self, discord_msg_id: str) -> str | None:
         """根据 Discord 消息 ID 直接从 forward_log 中获取发送者 ID"""
@@ -358,7 +390,7 @@ class MsgTransfer(star.Star):
         """创建一则消息转发绑定的请求"""
         code = gen_code()
         source_umo = str(event.unified_msg_origin)
-        self.store.add_pending(code, source_umo)
+        await self.store.add_pending(code, source_umo)
 
         yield event.plain_result(
             f"📌 已创建绑定请求\n"
@@ -370,14 +402,14 @@ class MsgTransfer(star.Star):
         """接受一则消息转发绑定的请求"""
         try:
             target_umo = str(event.unified_msg_origin)
-            source_umo = self.store.pop_pending(code)
-            rid = self.store.add_rule(source_umo, target_umo)
-            
+            source_umo = await self.store.pop_pending(code)
+            rid = await self.store.add_rule(source_umo, target_umo)
+
             # 如果目标是Discord，自动创建Webhook（黑盒操作，不告知用户）
             # 检查平台名称或UMO格式
             target_platform = event.get_platform_name()
             is_discord = target_platform == "discord" or "discord" in target_umo.lower()
-            
+
             if is_discord:
                 # 提取频道ID
                 channel_id = None
@@ -386,12 +418,12 @@ class MsgTransfer(star.Star):
                     channel_id = parts[2]
                 elif len(parts) == 2:
                     channel_id = parts[1]
-                
+
                 if channel_id:
                     webhook_url = await self.webhook_manager.create_webhook_for_channel(int(channel_id))
                     if webhook_url:
-                        self.store.set_webhook_url(target_umo, webhook_url)
-            
+                        await self.store.set_webhook_url(target_umo, webhook_url)
+
             yield event.plain_result(f"✅ 绑定成功 # {rid}")
         except Exception as e:
             logger.error(f"[Bind] 绑定异常: {e}", exc_info=True)
@@ -402,7 +434,7 @@ class MsgTransfer(star.Star):
     async def cmd_del(self, event: AstrMessageEvent, rid: str):
         """删除一条转发规则"""
         try:
-            self.store.delete_rule(rid)
+            await self.store.delete_rule(rid)
             yield event.plain_result(f"🗑️ 已删除规则 #{rid}")
         except Exception as e:
             yield event.plain_result(f"❌ 删除失败: {e}")
@@ -437,7 +469,7 @@ class MsgTransfer(star.Star):
                 if discord_msg_id:
                     msg_text = DiscordWebhookManager.format_message_content(message_chain)
                     if msg_text:
-                        self.store.add_forward_log(str(discord_msg_id), msg_text, event.get_sender_id())
+                        await self.store.add_forward_log(str(discord_msg_id), msg_text, event.get_sender_id())
             # 顺序依次await每个转发，保证顺序
             for rid, rule in rules.items():
                 await self._forward_single_rule(event, rule, rid, source_umo, message_chain)
@@ -456,7 +488,7 @@ class MsgTransfer(star.Star):
                 mapping = self.store.load_mappings()
                 if mapping.get(qq_id) != qq_name:
                     mapping[qq_id] = qq_name
-                    self.store.save_mappings(mapping)
+                    await self.store.save_mappings(mapping)
                     logger.info(f"转发时已更新QQ号 {qq_id} 的名称: {mapping.get(qq_id)} -> {qq_name}")
 
             target = rule["target_umo"]
@@ -510,7 +542,7 @@ class MsgTransfer(star.Star):
                 logger.error(f"通过 AstrBot 转发 #{rid} 失败: {e}")
         except Exception as e:
             logger.error(f"❌ 处理规则 #{rid} 时发生异常: {e}")
-    
+
     async def _forward_with_webhook(self, event: AstrMessageEvent, target_umo: str, message_chain, rule_id: str, webhook_url: str) -> bool:
         try:
             sender_name = event.get_sender_name()
@@ -657,7 +689,7 @@ class MsgTransfer(star.Star):
                 if qq_msg_id:
                     qq_user_id = event.get_sender_id()
                     qq_user_name = event.get_sender_name()
-                    self.store.set_msg_mapping(qq_msg_id, discord_msg_id, qq_user_id, qq_user_name)
+                    await self.store.set_msg_mapping(qq_msg_id, discord_msg_id, qq_user_id, qq_user_name)
                 return True
 
             return False
