@@ -1,4 +1,5 @@
 """Discord Webhook管理模块"""
+import re
 import aiohttp
 from astrbot.api import logger
 from astrbot.core.star.star import star_map
@@ -10,233 +11,230 @@ except ImportError:
     HAS_DISCORD = False
     logger.warning("未安装discord库，自动创建Webhook功能不可用")
 
+# Discord API 限制
+MAX_CONTENT_LENGTH = 2000
+MAX_USERNAME_LENGTH = 80
+# Discord 禁止的用户名子串（大小写不敏感）
+FORBIDDEN_USERNAME_SUBSTRINGS = ("discord", "clyde")
+REQUEST_TIMEOUT_SECONDS = 30
+
 
 class DiscordWebhookManager:
     """Discord Webhook管理器"""
-    
+
     def __init__(self, context=None):
         self._discord_client = None
         self._context = context
-    
+        self._session: aiohttp.ClientSession | None = None
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        if self._session is None or self._session.closed:
+            timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECONDS)
+            self._session = aiohttp.ClientSession(timeout=timeout)
+        return self._session
+
+    async def close(self):
+        """释放 aiohttp session 资源"""
+        if self._session and not self._session.closed:
+            await self._session.close()
+            self._session = None
+
     def set_context(self, context):
         """设置context，用于获取Discord客户端"""
         self._context = context
-    
+
+    def _try_extract_discord_client(self, platform_inst) -> bool:
+        """检查 platform_inst 是否持有 Discord 客户端，若是则缓存"""
+        if not hasattr(platform_inst, 'client'):
+            return False
+        try:
+            client = platform_inst.client
+            if hasattr(client, 'user') and client.user and hasattr(client, 'create_webhook'):
+                self._discord_client = client
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _search_platform_insts(self, platform_manager) -> bool:
+        """在 platform_manager.platform_insts 中搜索 Discord 客户端"""
+        if not hasattr(platform_manager, 'platform_insts'):
+            return False
+        insts = platform_manager.platform_insts
+        if isinstance(insts, dict):
+            for inst in insts.values():
+                if self._try_extract_discord_client(inst):
+                    return True
+        elif isinstance(insts, list):
+            for inst in insts:
+                if self._try_extract_discord_client(inst):
+                    return True
+        return False
+
     def _get_discord_client(self):
         """获取Discord客户端实例"""
         if not HAS_DISCORD:
             return None
-        
-        if self._discord_client is None:
-            # 首先尝试从设置的context获取
-            if self._context and hasattr(self._context, 'platform_manager'):
-                platform_manager = self._context.platform_manager
-                
-                # 使用正确的属性名：platform_insts
-                if hasattr(platform_manager, 'platform_insts'):
-                    platform_insts = platform_manager.platform_insts
-                    
-                    # platform_insts可能是列表或字典
-                    if isinstance(platform_insts, dict):
-                        for platform_id, platform_inst in platform_insts.items():
-                            if hasattr(platform_inst, 'client'):
-                                try:
-                                    if hasattr(platform_inst.client, 'user') and platform_inst.client.user:
-                                        if hasattr(platform_inst.client, 'create_webhook'):
-                                            self._discord_client = platform_inst.client
-                                            return self._discord_client
-                                except Exception:
-                                    pass
-                    elif isinstance(platform_insts, list):
-                        for platform_inst in platform_insts:
-                            try:
-                                # 直接检查是否是DiscordPlatformAdapter
-                                if 'DiscordPlatformAdapter' in str(type(platform_inst)):
-                                    if hasattr(platform_inst, 'client'):
-                                        self._discord_client = platform_inst.client
-                                        return self._discord_client
-                            except Exception:
-                                pass
-            
-            # 如果从context获取失败，尝试从star_map获取
-            if self._discord_client is None:
-                for star_instance in star_map.values():
-                    if hasattr(star_instance, 'context') and hasattr(star_instance.context, 'platform_manager'):
-                        platform_manager = star_instance.context.platform_manager
-                        
-                        if hasattr(platform_manager, 'platform_insts'):
-                            platform_insts = platform_manager.platform_insts
-                            
-                            if isinstance(platform_insts, dict):
-                                for platform_id, platform_inst in platform_insts.items():
-                                    if hasattr(platform_inst, 'client'):
-                                        try:
-                                            if hasattr(platform_inst.client, 'user') and platform_inst.client.user:
-                                                if hasattr(platform_inst.client, 'create_webhook'):
-                                                    self._discord_client = platform_inst.client
-                                                    return self._discord_client
-                                        except Exception:
-                                            pass
-                            elif isinstance(platform_insts, list):
-                                for platform_inst in platform_insts:
-                                    try:
-                                        if 'DiscordPlatformAdapter' in str(type(platform_inst)):
-                                            if hasattr(platform_inst, 'client'):
-                                                self._discord_client = platform_inst.client
-                                                return self._discord_client
-                                    except Exception:
-                                        pass
-        
-        return self._discord_client
-    
+
+        if self._discord_client is not None:
+            return self._discord_client
+
+        # 优先从当前 context 查找
+        if self._context and hasattr(self._context, 'platform_manager'):
+            if self._search_platform_insts(self._context.platform_manager):
+                return self._discord_client
+
+        # 回退：遍历所有 star 实例
+        for star_instance in star_map.values():
+            if hasattr(star_instance, 'context') and hasattr(star_instance.context, 'platform_manager'):
+                if self._search_platform_insts(star_instance.context.platform_manager):
+                    return self._discord_client
+
+        return None
+
     async def create_webhook_for_channel(self, channel_id: int, webhook_name: str = "MsgTransfer Bot") -> str | None:
-        """为指定频道自动创建Webhook
-        
-        Args:
-            channel_id: Discord频道ID
-            webhook_name: Webhook名称
-            
-        Returns:
-            Webhook URL，如果创建失败返回None
-        """
+        """为指定频道自动创建Webhook"""
         if not HAS_DISCORD:
-            logger.error("❌ 未安装discord库，无法自动创建Webhook")
+            logger.error("未安装discord库，无法自动创建Webhook")
             return None
-        
+
         client = self._get_discord_client()
-        
         if not client:
-            logger.error("❌ 无法获取Discord客户端")
+            logger.error("无法获取Discord客户端")
             return None
-        
+
         try:
-            # 获取频道对象
             channel = client.get_channel(channel_id)
             if not channel:
-                logger.error(f"❌ 无法获取频道 {channel_id}")
+                logger.error(f"无法获取频道 {channel_id}")
                 return None
-            
-            # 检查是否可以创建Webhook
+
             if not hasattr(channel, 'create_webhook'):
-                logger.error(f"❌ 频道 {channel_id} 不支持创建Webhook")
+                logger.error(f"频道 {channel_id} 不支持创建Webhook")
                 return None
-            
-            # 创建Webhook
+
             webhook = await channel.create_webhook(
-                name=webhook_name,
+                name=self._sanitize_username(webhook_name),
                 reason="自动创建用于消息转发的Webhook"
             )
-            
-            logger.info(f"✅ 成功为频道 {channel_id} 创建Webhook")
+            logger.info(f"成功为频道 {channel_id} 创建Webhook")
             return webhook.url
-            
+
         except discord.Forbidden:
-            logger.error(f"❌ 机器人在频道 {channel_id} 没有创建Webhook的权限")
+            logger.error(f"机器人在频道 {channel_id} 没有创建Webhook的权限")
             return None
         except discord.HTTPException as e:
-            logger.error(f"❌ 创建Webhook时发生HTTP错误: {e}")
+            logger.error(f"创建Webhook时发生HTTP错误: {e}")
             return None
         except Exception as e:
-            logger.error(f"❌ 创建Webhook时发生未知错误: {e}")
+            logger.error(f"创建Webhook时发生未知错误: {e}")
             return None
-    
+
     @staticmethod
     def get_qq_avatar_url(qq_id: str) -> str:
         """获取QQ用户头像URL"""
         return f"http://q1.qlogo.cn/g?b=qq&nk={qq_id}&s=100"
-    
-    @staticmethod
-    def get_discord_avatar_url(discord_id: str) -> str:
-        """获取Discord用户头像URL"""
-        return f"https://cdn.discordapp.com/avatars/{discord_id}/default.png"
-    
+
     @staticmethod
     def get_default_avatar_url() -> str:
         """获取默认头像URL"""
         return "https://cdn.discordapp.com/embed/avatars/0.png"
-    
+
     @staticmethod
     def get_avatar_url(platform: str, user_id: str) -> str:
-        """获取用户头像URL"""
+        """根据平台获取用户头像URL"""
         if platform == "aiocqhttp":
             return DiscordWebhookManager.get_qq_avatar_url(user_id)
-        elif platform == "discord":
-            return DiscordWebhookManager.get_discord_avatar_url(user_id)
-        else:
-            return DiscordWebhookManager.get_default_avatar_url()
-    
+        # Discord 头像需要 avatar_hash，仅有 user_id 无法构造有效 URL，统一回退到默认
+        return DiscordWebhookManager.get_default_avatar_url()
+
+    @staticmethod
+    def _sanitize_username(name: str) -> str:
+        """清理用户名，符合 Discord Webhook 要求
+
+        - 不超过 80 字符
+        - 不包含 'discord' 或 'clyde'（大小写不敏感）
+        """
+        # 截断
+        name = name[:MAX_USERNAME_LENGTH]
+        # 替换禁止的子串为相似字符
+        for forbidden in FORBIDDEN_USERNAME_SUBSTRINGS:
+            # 大小写不敏感替换
+            name = re.sub(forbidden, lambda m: m.group(0)[0] + '​' + m.group(0)[1:], name, flags=re.IGNORECASE)
+        return name
+
+    @staticmethod
+    def _truncate_content(content: str, max_len: int = MAX_CONTENT_LENGTH) -> str:
+        """截断消息内容至 Discord 限制长度"""
+        if len(content) <= max_len:
+            return content
+        # 保留前 max_len-1 个字符并在末尾添加截断标记
+        return content[:max_len - 1] + "…"
+
     @staticmethod
     def format_message_content(message_chain) -> str:
-        """格式化消息内容为文本+图片分离，图片url单独一行，保证图片和文本都完整显示"""
+        """格式化消息内容为文本+图片分离，图片url单独一行"""
         text_parts = []
         image_urls = []
         for component in message_chain:
-            # 处理文本
             if hasattr(component, 'text') and component.text:
                 text_parts.append(component.text)
-            # 处理@消息
             elif hasattr(component, 'qq') and component.qq:
                 text_parts.append(f"<@{component.qq}>")
-            # 处理URL（图片/文件/资源）
             elif hasattr(component, 'url') and component.url:
                 image_urls.append(component.url)
             elif hasattr(component, 'src') and component.src:
                 image_urls.append(component.src)
-        # 文本和图片分开，图片url每个单独一行
         content = ''.join(text_parts)
         if image_urls:
             if content and not content.endswith('\n'):
                 content += '\n'
             content += '\n'.join(image_urls)
         return content
-    
-    @staticmethod
+
     async def send_webhook_message(
+        self,
         webhook_url: str,
         username: str,
         avatar_url: str,
         content: str
     ) -> bool:
-        """发送消息到Discord Webhook
-        
-        Args:
-            webhook_url: Discord Webhook URL
-            username: 虚拟用户名
-            avatar_url: 虚拟用户头像URL
-            content: 消息内容（Discord会自动识别URL并显示图片）
-            
-        Returns:
-            bool: 是否发送成功
-        """
+        """发送消息到Discord Webhook，复用 aiohttp session"""
         try:
-            # Discord不允许content和embeds都为空，但允许content为空
             if not content:
-                content = "\u200b"  # 零宽空格
-            
+                content = "​"
+
+            # 校验并清理
+            username = self._sanitize_username(username)
+            content = self._truncate_content(content)
+
             payload = {
                 "content": content,
                 "username": username,
-                "avatar_url": avatar_url
+                "avatar_url": avatar_url,
+                # 禁止自动解析任何提及，防止 @everyone/@here 被意外触发
+                "allowed_mentions": {"parse": []},
             }
-            
-            async with aiohttp.ClientSession() as session:
-                async with session.post(webhook_url, json=payload) as resp:
-                    if resp.status in [200, 204, 201]:  # 200, 204, 201都表示成功
-                        return True
-                    else:
-                        return False
+
+            session = await self._get_session()
+            async with session.post(webhook_url, json=payload) as resp:
+                if resp.status not in (200, 201, 204):
+                    body = await resp.text()
+                    logger.error(
+                        f"Webhook发送失败 [HTTP {resp.status}]: {body[:500]}"
+                    )
+                    return False
+                return True
         except Exception as e:
-            logger.error(f"❌ Webhook发送异常: {e}")
+            logger.error(f"Webhook发送异常: {e}")
             return False
-    
+
     @staticmethod
     def build_virtual_username(sender_name: str, source_platform: str) -> str:
         """构建虚拟用户名"""
         platform_map = {
             "aiocqhttp": "QQ",
             "discord": "Discord",
-            "wechatpadpro": "微信",
-            "telegram": "Telegram"
         }
         platform_name = platform_map.get(source_platform, source_platform)
         return f"{sender_name} ({platform_name})"

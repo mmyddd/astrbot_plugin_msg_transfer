@@ -1,6 +1,5 @@
 import asyncio
 import json
-import os
 import secrets
 from pathlib import Path
 
@@ -34,8 +33,8 @@ def load_json(path: Path) -> dict:
         logger.error(f"❌ 读取文件 {path} 失败: {e}")
         raise RuntimeError(f"❌ 读取文件 {path} 失败: {e}") from e
     except Exception as e:
-        logger.error(f"❌ 发生预期外的 JSON 读取错误: {e}！")
-        raise RuntimeError(f"❌ 发生预期外的 JSON 读取错误: {e}！")
+        logger.error(f"❌ 发生预期外的 JSON 读取错误: {e}", exc_info=True)
+        raise RuntimeError(f"❌ 发生预期外的 JSON 读取错误: {e}")
 
 
 def save_json(path: Path, data: dict):
@@ -82,7 +81,7 @@ def format_origin_header(event: AstrMessageEvent, umo: str):
     # 消息类型友好名称
     if msg_type == "GroupMessage":
         msg_type_human = f"群组（ID: {conversation_id}）消息"
-    elif msg_type_human == "FriendMessage":
+    elif msg_type == "FriendMessage":
         msg_type_human = f"私聊（对方 ID: {conversation_id}）消息"
     else:
         msg_type_human = f"未知类型（ID: {conversation_id}）消息"
@@ -105,6 +104,7 @@ class MsgTransferStore:
         self._ensure_files()
 
     def _ensure_files(self):
+        self.rule_file.parent.mkdir(parents=True, exist_ok=True)
         if not self.rule_file.exists():
             self.rule_file.write_text("{}", encoding="utf-8")
         if not self.pending_file.exists():
@@ -432,7 +432,7 @@ class MsgTransfer(star.Star):
             if quote_block:
                 content = quote_block + content
 
-            success = await DiscordWebhookManager.send_webhook_message(
+            success = await self.webhook_manager.send_webhook_message(
                 webhook_url=webhook_url,
                 username=virtual_username,
                 avatar_url=avatar_url,
@@ -444,4 +444,5 @@ class MsgTransfer(star.Star):
             return False
 
     async def terminate(self):
+        await self.webhook_manager.close()
         logger.info("MsgTransfer plugin terminated")
