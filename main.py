@@ -332,7 +332,7 @@ class MsgTransfer(star.Star):
     def __init__(self, context: Context):
         super().__init__(context)
         # 使用 AstrBot 提供的标准方法获取项目持久化数据存储目录
-        self.data_dir = star.StarTools.get_data_dir("msg_transfer")
+        self.data_dir = star.StarTools.get_data_dir("astrbot_plugin_DiscordToQQTransfer")
         self.rule_file = self.data_dir / "rules.json"
         self.forward_log_file = self.data_dir / "forward_log.json"
         self.pending_file = self.data_dir / "pending.json"

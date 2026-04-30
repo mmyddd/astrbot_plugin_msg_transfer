@@ -53,7 +53,7 @@
 
 ## 📦 数据存储
 
-插件在 `data/plugin_data/msg_transfer/` 下维护以下文件：
+插件在 `data/plugin_data/astrbot_plugin_DiscordToQQTransfer/` 下维护以下文件：
 
 | 文件 | 用途 |
 |------|------|
