@@ -401,6 +401,16 @@ class MsgTransfer(star.Star):
                         quote_text = seg.text
                     if hasattr(seg, "sender_name") and not quote_sender:
                         quote_sender = seg.sender_name
+                    # 仍未取到时，尝试 message_str
+                    if not quote_text and hasattr(seg, "message_str") and seg.message_str:
+                        quote_text = seg.message_str
+                    # 引用文件消息时 text/chain 为空，从 chain 中提取文件名
+                    if not quote_text and hasattr(seg, "chain") and seg.chain:
+                        for sub in seg.chain:
+                            if sub.__class__.__name__ == "File":
+                                fname = getattr(sub, "name", None) or getattr(sub, "filename", None) or "文件"
+                                quote_text = f"[{fname}]"
+                                break
                     break
 
             # 替换消息链中的At(QQ)为对应名称
