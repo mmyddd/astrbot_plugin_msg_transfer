@@ -473,18 +473,20 @@ class MsgTransfer(star.Star):
                     except Exception:
                         pass
 
+                prefix = f"**{quote_sender}**: " if quote_sender else ""
                 if jump_url:
                     label = quote_text or "引用消息"
-                    content = f"> [{label}]({jump_url})\n{content}"
+                    content = f"> {prefix}[{label}]({jump_url})\n{content}"
                 elif quote_text:
-                    content = f"> {quote_text}\n{content}"
+                    content = f"> {prefix}{quote_text}\n{content}"
 
             # 无原生回复时带 markdown 引用
             elif quote_text:
+                prefix = f"**{quote_sender}**: " if quote_sender else ""
                 if (quote_text.startswith('http://') or quote_text.startswith('https://')) and (quote_text.endswith('.jpg') or quote_text.endswith('.png') or quote_text.endswith('.jpeg') or quote_text.endswith('.gif') or quote_text.endswith('.webp')):
-                    quote_block = f"> [图片]({quote_text})\n"
+                    quote_block = f"> {prefix}[图片]({quote_text})\n"
                 else:
-                    quote_block = f"> {quote_text}\n"
+                    quote_block = f"> {prefix}{quote_text}\n"
                 content = quote_block + content
 
             discord_msg_id = await self.webhook_manager.send_webhook_message(
