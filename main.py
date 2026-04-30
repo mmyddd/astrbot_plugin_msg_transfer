@@ -1,4 +1,3 @@
-import asyncio
 import json
 import secrets
 from pathlib import Path
@@ -10,7 +9,7 @@ from astrbot.api import logger
 
 import string
 
-from astrbot.core.message.components import BaseMessageComponent, Plain
+from astrbot.core.message.components import Plain
 from .webhook import DiscordWebhookManager
 
 
@@ -58,38 +57,6 @@ def gen_code(n=6):
     # 使用 secrets 模块生成更安全的随机字符串
     alphabet = string.ascii_lowercase + string.digits
     return ''.join(secrets.choice(alphabet) for _ in range(n))
-
-
-def format_origin_header(event: AstrMessageEvent, umo: str):
-    try:
-        _, msg_type, conversation_id = umo.split(":", 2)
-    except ValueError:
-        msg_type = "Unknown"
-        conversation_id = "Unknown"
-
-    source_platform = event.get_platform_name()
-    sender_name = event.get_sender_name()
-    sender_id = event.get_sender_id()
-
-    # 平台友好名称
-    source_platform_map = {
-        "aiocqhttp": "QQ",
-        "discord": "Discord"
-    }
-    source_platform_human = source_platform_map.get(source_platform, source_platform)
-
-    # 消息类型友好名称
-    if msg_type == "GroupMessage":
-        msg_type_human = f"群组（ID: {conversation_id}）消息"
-    elif msg_type == "FriendMessage":
-        msg_type_human = f"私聊（对方 ID: {conversation_id}）消息"
-    else:
-        msg_type_human = f"未知类型（ID: {conversation_id}）消息"
-
-    return (
-        f"[转发] {sender_name} ({sender_id})\n"
-        f"来自 {source_platform_human} 的 {msg_type_human}"
-    )
 
 
 # ------------------------
@@ -381,18 +348,9 @@ class MsgTransfer(star.Star):
             target = rule["target_umo"]
             webhook_url = self.store.get_webhook_url(target)
             if webhook_url:
-                success = await self._forward_with_webhook(event, target, message_chain, rid, webhook_url)
-                if success:
-                    return
-            try:
-                header = format_origin_header(event, source_umo)
-                header += "\n\n\u200b"
-                new_chain = list[BaseMessageComponent]([Plain(text=header)]) + message_chain
-                await self.context.send_message(target, event.chain_result(new_chain))
-            except ValueError as e:
-                logger.error(f"❌ 不合法的 session 字符串，转发失败 #{rid}: {e}")
-            except Exception as e:
-                logger.error(f"❌ 转发失败 #{rid}: {e}")
+                await self._forward_with_webhook(event, target, message_chain, rid, webhook_url)
+                return
+            logger.warning(f"目标 {target} 未配置 webhook，跳过转发 #{rid}")
         except Exception as e:
             logger.error(f"❌ 处理规则 #{rid} 时发生异常: {e}")
     
