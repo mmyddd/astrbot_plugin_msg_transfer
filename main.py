@@ -396,7 +396,19 @@ class MsgTransfer(star.Star):
             if webhook_url:
                 await self._forward_with_webhook(event, target, message_chain, rid, webhook_url)
                 return
-            logger.warning(f"目标 {target} 未配置 webhook，跳过转发 #{rid}")
+
+            # 非 webhook 目标（如 QQ），通过 AstrBot 框架发送
+            try:
+                from astrbot.core.message.message_event_result import MessageChain
+                chain = MessageChain()
+                chain.chain = list(message_chain)
+                sent = await self.context.send_message(target, chain)
+                if sent:
+                    logger.info(f"已转发 #{rid} -> {target}")
+                else:
+                    logger.warning(f"转发 #{rid} 未找到目标平台适配器: {target}")
+            except Exception as e:
+                logger.error(f"通过 AstrBot 转发 #{rid} 失败: {e}")
         except Exception as e:
             logger.error(f"❌ 处理规则 #{rid} 时发生异常: {e}")
     
