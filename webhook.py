@@ -1,5 +1,6 @@
 """Discord Webhook管理模块"""
 import re
+import urllib.parse
 import aiohttp
 from astrbot.api import logger
 from astrbot.core.star.star import star_map
@@ -185,6 +186,13 @@ class DiscordWebhookManager:
                 name = component.name or "文件"
                 file_url = component.url or ""
                 if file_url:
+                    # 确保 fname 参数包含文件名
+                    parsed = urllib.parse.urlparse(file_url)
+                    qs = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+                    if 'fname' in qs and not qs['fname'][0]:
+                        qs['fname'] = [name]
+                        new_query = urllib.parse.urlencode(qs, doseq=True)
+                        file_url = urllib.parse.urlunparse(parsed._replace(query=new_query))
                     extra_lines.append(f"[{name}]({file_url})")
                 else:
                     text_parts.append(f"[{name}]")
