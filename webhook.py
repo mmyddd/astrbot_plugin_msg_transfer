@@ -185,7 +185,18 @@ class DiscordWebhookManager:
         return content[:max_len - 1] + "…"
 
     @staticmethod
-    def format_message_content(message_chain) -> str:
+    def extract_images(message_chain) -> list:
+        """从消息链中提取所有图片URL"""
+        urls = []
+        for component in message_chain:
+            if component.__class__.__name__ == "Image":
+                img_url = getattr(component, 'url', None)
+                if img_url:
+                    urls.append(img_url)
+        return urls
+
+    @staticmethod
+    def format_message_content(message_chain, skip_images=False) -> str:
         """格式化消息内容为Discord可读的文本"""
         text_parts = []
         extra_lines = []
@@ -195,6 +206,8 @@ class DiscordWebhookManager:
             elif hasattr(component, 'qq') and component.qq:
                 text_parts.append(f"<@{component.qq}>")
             elif component.__class__.__name__ == "Image":
+                if skip_images:
+                    continue
                 img_url = getattr(component, 'url', None)
                 if img_url:
                     extra_lines.append(img_url)
@@ -232,10 +245,11 @@ class DiscordWebhookManager:
         username: str,
         avatar_url: str,
         content: str,
+        embeds: list | None = None,
     ) -> str | None:
         """发送消息到Discord Webhook，返回Discord消息ID（失败返回None）"""
         try:
-            if not content:
+            if not content and not embeds:
                 content = "​"  # zero-width space, prevents Discord "message cannot be empty" rejection
 
             username = self._sanitize_username(username)
@@ -247,6 +261,8 @@ class DiscordWebhookManager:
                 "avatar_url": avatar_url,
                 "allowed_mentions": {"parse": ["users"]},
             }
+            if embeds:
+                payload["embeds"] = embeds
 
             session = await self._get_session()
             async with session.post(webhook_url, json=payload, params={"wait": "true"}) as resp:

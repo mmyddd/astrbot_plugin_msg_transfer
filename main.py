@@ -834,11 +834,14 @@ class MsgTransfer(star.Star):
             # Step 4: 替换 @提及
             new_chain = self._replace_ats(message_chain, discord_sender_id, discord_sender_name, mapping, self_id)
 
-            # Step 5-6: 构建 webhook 内容（含引用块）
+            # Step 5-6: 构建 webhook 内容（含引用块）和 embeds
             virtual_username = DiscordWebhookManager.build_virtual_username(sender_name, source_platform)
             avatar_url = DiscordWebhookManager.get_avatar_url(source_platform, sender_id)
-            raw_content = DiscordWebhookManager.format_message_content(new_chain)
+            # 提取图片并转为 Discord embeds，内容中不再包含图片 URL
+            image_urls = DiscordWebhookManager.extract_images(new_chain)
+            raw_content = DiscordWebhookManager.format_message_content(new_chain, skip_images=True)
             content = self._build_webhook_quote(raw_content, reply_to_discord_id, jump_url, quote_text, quote_sender)
+            embeds = [{"image": {"url": url}} for url in image_urls[:10]]  # Discord 最多 10 个 embed
 
             # Step 7: 发送并记录映射
             discord_msg_id = await self.webhook_manager.send_webhook_message(
@@ -846,6 +849,7 @@ class MsgTransfer(star.Star):
                 username=virtual_username,
                 avatar_url=avatar_url,
                 content=content,
+                embeds=embeds if embeds else None,
             )
 
             if discord_msg_id:
